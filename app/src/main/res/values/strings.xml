@@ -1,3 +1,28 @@
 <resources>
     <string name="app_name">RCamera</string>
+    <string name="camera_notification_channel_name">远程相机服务</string>
+    <string name="camera_notification_title">相机服务运行中</string>
+    <string name="camera_list_title">远程摄像头</string>
+    <string name="add_camera_title">添加远程摄像头</string>
+    <string name="btn_open_camera">打开相机</string>
+    <string name="btn_browse_cameras">浏览远程摄像头</string>
+    <string name="btn_add_camera">添加远程摄像头</string>
+    <string name="btn_scan_qr">扫描二维码添加</string>
+    <string name="hint_camera_name">名称</string>
+    <string name="hint_ws_url">WebSocket 地址 (ws://IP:PORT)</string>
+    <string name="hint_password">连接密码</string>
+    <string name="btn_save">保存</string>
+    <string name="btn_connect">连接</string>
+    <string name="btn_cancel">取消</string>
+    <string name="ws_server_running">WebSocket 服务器运行中</string>
+    <string name="ws_server_stopped">WebSocket 服务器未运行</string>
+    <string name="no_cameras">暂无远程摄像头</string>
+    <string name="dialog_input_password">输入密码</string>
+    <string name="dialog_server_settings">服务器设置</string>
+    <string name="state_connected">已连接</string>
+    <string name="state_connecting">连接中...</string>
+    <string name="state_authenticating">认证中...</string>
+    <string name="state_disconnected">未连接</string>
+    <string name="state_auth_failed">认证失败</string>
+    <string name="state_error">连接错误</string>
 </resources>
