@@ -15,12 +15,33 @@ typealias WsServerMessageHandler = (conn: WebSocket, message: WsMessage) -> Unit
 typealias WsServerConnectionHandler = (conn: WebSocket) -> Unit
 
 data class IpInfo(
-    val ipv6Address: String?,      // IPv6 address (preferred)
-    val ipv4Address: String?,      // IPv4 address (fallback)
+    val ipv6Address: String?,      // IPv6 address (available if device has IPv6)
+    val ipv4Address: String?,      // IPv4 address (available if device has IPv4)
     val isIpv6Lan: Boolean,        // Whether IPv6 is a LAN address
-    val preferredAddress: String,  // The preferred address for display/QR
+    val isIpv4Lan: Boolean,        // Whether IPv4 is a LAN address
+    val preferredAddress: String,  // The preferred address for display (IPv6 if available)
     val isLan: Boolean             // Whether the preferred address is LAN
-)
+) {
+    /**
+     * Generate WebSocket URL for the given address and port.
+     */
+    fun buildWsUrl(address: String, port: Int): String {
+        val host = if (address.contains(":")) "[$address]" else address
+        return "ws://$host:$port"
+    }
+
+    /**
+     * Build URL using IPv6 address, or null if not available.
+     */
+    fun getIpv6WsUrl(port: Int): String? =
+        ipv6Address?.let { buildWsUrl(it, port) }
+
+    /**
+     * Build URL using IPv4 address, or null if not available.
+     */
+    fun getIpv4WsUrl(port: Int): String? =
+        ipv4Address?.let { buildWsUrl(it, port) }
+}
 
 class WsServer(
     port: Int,
@@ -141,13 +162,22 @@ class WsServer(
         return "ws://$host:$port"
     }
 
+    /**
+     * Get WebSocket URL for a specific IP address.
+     */
+    fun getUrlForAddress(addr: String): String {
+        val port = address.port
+        val host = if (addr.contains(":")) "[$addr]" else addr
+        return "ws://$host:$port"
+    }
+
     fun getIpInfo(): IpInfo {
         var ipv6Global: String? = null
         var ipv6LinkLocal: String? = null
         var ipv4: String? = null
 
         try {
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return IpInfo(null, "0.0.0.0", false, "0.0.0.0", false)
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return IpInfo(null, "0.0.0.0", false, false, "0.0.0.0", false)
             for (intf in interfaces) {
                 if (!intf.isUp || intf.isLoopback) continue
                 for (addr in intf.inetAddresses) {
@@ -180,12 +210,10 @@ class WsServer(
             }
         } catch (_: Exception) {}
 
-        // Prefer global IPv6 > link-local IPv6 > IPv4
+        // Prefer global IPv6 > link-local IPv6 > IPv4 for default display
         val ipv6 = ipv6Global ?: ipv6LinkLocal
         val isIpv6Lan = ipv6 != null && ipv6Global == null
-        // When IPv6 is available, don't show/use IPv4
-        val hasIpv6 = ipv6 != null
-        val displayIpv4 = if (hasIpv6) null else ipv4
+        val isIpv4Lan = ipv4 != null && isIpv4LanAddress(ipv4!!)
 
         val preferred = when {
             ipv6 != null -> ipv6
@@ -195,14 +223,15 @@ class WsServer(
         val isLan = when {
             ipv6Global != null -> false
             ipv6 != null -> true // link-local or unique-local IPv6
-            ipv4 != null -> isIpv4LanAddress(ipv4)
+            ipv4 != null -> isIpv4Lan
             else -> false
         }
 
         return IpInfo(
             ipv6Address = ipv6,
-            ipv4Address = displayIpv4,
+            ipv4Address = ipv4,  // Always provide IPv4 when available
             isIpv6Lan = isIpv6Lan,
+            isIpv4Lan = isIpv4Lan,
             preferredAddress = preferred,
             isLan = isLan
         )
@@ -241,14 +270,14 @@ class WsServer(
     }
 
     private fun isIpv4LanAddress(ipv4: String): Boolean {
-        return ipv4.startsWith("192.168.") ||
-                ipv4.startsWith("10.") ||
-                ipv4.startsWith("172.16.") ||
-                ipv4.startsWith("172.17.") ||
-                ipv4.startsWith("172.18.") ||
-                ipv4.startsWith("172.19.") ||
-                ipv4.startsWith("172.2") ||
-                ipv4.startsWith("172.3")
+        if (ipv4.startsWith("192.168.")) return true
+        if (ipv4.startsWith("10.")) return true
+        // 172.16.0.0 - 172.31.255.255 (RFC 1918)
+        if (ipv4.startsWith("172.")) {
+            val secondOctet = ipv4.removePrefix("172.").substringBefore(".").toIntOrNull() ?: return false
+            if (secondOctet in 16..31) return true
+        }
+        return false
     }
 
     companion object {

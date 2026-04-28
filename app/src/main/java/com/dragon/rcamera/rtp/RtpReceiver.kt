@@ -3,6 +3,7 @@ package com.dragon.rcamera.rtp
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 
@@ -23,10 +24,21 @@ class RtpReceiver {
     private val naluBuffer = mutableListOf<ByteArray>()
     private val lock = Object()
 
+    // Stats for debugging
+    @Volatile private var receivedPacketCount = 0
+    @Volatile private var deliveredFrameCount = 0
+    @Volatile private var lastFrameSize = 0
+
+    fun getStats(): String = "pkts=$receivedPacketCount frames=$deliveredFrameCount lastSize=$lastFrameSize"
+
     fun start(localPort: Int) {
         if (isRunning) return
         try {
-            socket = DatagramSocket(localPort)
+            // Bind to IPv6 wildcard "::" for dual-stack (IPv4+IPv6) support.
+            // If localPort is 0, the system picks an available port.
+            socket = DatagramSocket(null)
+            socket?.reuseAddress = true
+            socket?.bind(InetSocketAddress("::", localPort))
             socket?.soTimeout = 5000
             isRunning = true
 
@@ -37,9 +49,18 @@ class RtpReceiver {
                 start()
             }
 
-            Log.d(TAG, "RTP receiver started on port $localPort")
+            Log.d(TAG, "RTP receiver started on port ${socket?.localPort}, bound to :: (dual-stack)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start RTP receiver", e)
+            Log.e(TAG, "Failed to start RTP receiver on ::, falling back", e)
+            // Fallback to IPv4 only if IPv6 binding fails
+            try {
+                socket = DatagramSocket(localPort)
+                socket?.soTimeout = 5000
+                isRunning = true
+                Log.d(TAG, "RTP receiver started on port ${socket?.localPort}, bound to 0.0.0.0 (IPv4 only)")
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to start RTP receiver", e2)
+            }
         }
     }
 
@@ -57,6 +78,9 @@ class RtpReceiver {
             naluBuffer.clear()
         }
         currentTimestamp = -1
+        receivedPacketCount = 0
+        deliveredFrameCount = 0
+        lastFrameSize = 0
         Log.d(TAG, "RTP receiver stopped")
     }
 
@@ -79,6 +103,14 @@ class RtpReceiver {
                 val data = packet.data
                 val length = packet.length
                 if (length < RtpPacket.HEADER_SIZE) continue
+
+                receivedPacketCount++
+                if (receivedPacketCount == 1) {
+                    Log.d(TAG, "First RTP packet received! From ${packet.address}:${packet.port}, length=$length")
+                }
+                if (receivedPacketCount % 300 == 0) {
+                    Log.d(TAG, "RTP stats: received $receivedPacketCount packets, delivered $deliveredFrameCount frames")
+                }
 
                 // Parse RTP header
                 val bufWrap = ByteBuffer.wrap(data, 0, length)
@@ -222,6 +254,8 @@ class RtpReceiver {
             }
 
             naluBuffer.clear()
+            deliveredFrameCount++
+            lastFrameSize = totalSize
             onFrameReceived?.invoke(frame)
         }
     }

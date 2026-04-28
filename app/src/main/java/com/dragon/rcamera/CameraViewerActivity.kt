@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.dragon.rcamera.rtp.H264Decoder
@@ -107,6 +108,15 @@ fun CameraViewerScreen(
     var connectionState by remember { mutableStateOf(WsClientState.DISCONNECTED) }
     var isReceiving by remember { mutableStateOf(false) }
     var isSurfaceReady by remember { mutableStateOf(false) }
+    var debugInfo by remember { mutableStateOf("") }
+
+    // Update debug info periodically
+    LaunchedEffect(rtpReceiver, h264Decoder) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            debugInfo = "RTP: ${rtpReceiver.getStats()} | Dec: ${h264Decoder.getStats()}"
+        }
+    }
 
     // Setup WebSocket message handler
     DisposableEffect(wsManager) {
@@ -115,10 +125,14 @@ fun CameraViewerScreen(
             if (state == WsClientState.CONNECTED) {
                 // Connected and authenticated, request RTP start
                 val localRtpPort = rtpReceiver.getLocalPort()
+                Log.d("CameraViewer", "WebSocket connected, local RTP port=$localRtpPort")
                 if (localRtpPort > 0) {
-                    wsManager.sendCommand(WsMessage.ACTION_START_RTP, com.google.gson.JsonObject().apply {
+                    val sent = wsManager.sendCommand(WsMessage.ACTION_START_RTP, com.google.gson.JsonObject().apply {
                         addProperty("rtp_port", localRtpPort)
                     })
+                    Log.d("CameraViewer", "Sent start_rtp command: port=$localRtpPort, sent=$sent")
+                } else {
+                    Log.e("CameraViewer", "RTP receiver port is 0, cannot start RTP! Receiver may have failed to start.")
                 }
             }
             if (state == WsClientState.DISCONNECTED || state == WsClientState.ERROR || state == WsClientState.AUTH_FAILED) {
@@ -127,11 +141,17 @@ fun CameraViewerScreen(
         }
 
         wsManager.onClientMessageReceived = { message ->
+            Log.d("CameraViewer", "Received message: action=${message.action}, payload=${message.payload}")
             if (message.action == "start_rtp_result") {
                 val success = message.payload.get("success")?.asBoolean ?: false
                 if (success) {
                     isReceiving = true
-                    Log.d("CameraViewer", "RTP stream started")
+                    val serverRtpPort = message.payload.get("server_rtp_port")?.asInt ?: 0
+                    val w = message.payload.get("video_width")?.asInt ?: 0
+                    val h = message.payload.get("video_height")?.asInt ?: 0
+                    Log.d("CameraViewer", "RTP stream started, server_rtp_port=$serverRtpPort, video=${w}x${h}")
+                } else {
+                    Log.e("CameraViewer", "RTP start failed: ${message.payload}")
                 }
             }
         }
@@ -174,22 +194,32 @@ fun CameraViewerScreen(
                     .fillMaxWidth()
                     .padding(8.dp)
             ) {
-                Text(
-                    text = when (connectionState) {
-                        WsClientState.CONNECTED -> if (isReceiving) "接收视频中..." else "已连接，等待视频流..."
-                        WsClientState.CONNECTING -> "连接中..."
-                        WsClientState.AUTHENTICATING -> "认证中..."
-                        WsClientState.DISCONNECTED -> "未连接"
-                        WsClientState.AUTH_FAILED -> "认证失败"
-                        WsClientState.ERROR -> "连接错误"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = when (connectionState) {
-                        WsClientState.CONNECTED -> MaterialTheme.colorScheme.primary
-                        WsClientState.CONNECTING, WsClientState.AUTHENTICATING -> MaterialTheme.colorScheme.tertiary
-                        else -> MaterialTheme.colorScheme.error
+                Column {
+                    Text(
+                        text = when (connectionState) {
+                            WsClientState.CONNECTED -> if (isReceiving) "接收视频中..." else "已连接，等待视频流..."
+                            WsClientState.CONNECTING -> "连接中..."
+                            WsClientState.AUTHENTICATING -> "认证中..."
+                            WsClientState.DISCONNECTED -> "未连接"
+                            WsClientState.AUTH_FAILED -> "认证失败"
+                            WsClientState.ERROR -> "连接错误"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when (connectionState) {
+                            WsClientState.CONNECTED -> MaterialTheme.colorScheme.primary
+                            WsClientState.CONNECTING, WsClientState.AUTHENTICATING -> MaterialTheme.colorScheme.tertiary
+                            else -> MaterialTheme.colorScheme.error
+                        }
+                    )
+                    if (debugInfo.isNotBlank()) {
+                        Text(
+                            text = debugInfo,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
-                )
+                }
             }
 
             // Video surface

@@ -16,6 +16,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,6 +43,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -195,6 +197,8 @@ fun CameraPreviewScreen(
     var showSettings by remember { mutableStateOf(false) }
     var serverPassword by remember { mutableStateOf(store.getServerPassword()) }
     var serverPort by remember { mutableStateOf(store.getServerPort().toString()) }
+    // Selected address for QR code: null means auto (preferred), or specific address
+    var selectedQrAddress by remember { mutableStateOf<String?>(null) }
 
     // 定期刷新状态
     LaunchedEffect(cameraService) {
@@ -317,44 +321,103 @@ fun CameraPreviewScreen(
                     }
                     if (isWsRunning && ipInfo != null) {
                         val info = ipInfo!!
+                        val port = serverPort.toIntOrNull() ?: 8888
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Display address based on availability: IPv6 preferred, IPv4 only when no IPv6
+                        // IPv6 address row (clickable to select for QR)
                         if (info.ipv6Address != null) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "IPv6: ",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = "[${info.ipv6Address}]:${serverPort}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                if (info.isIpv6Lan) {
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        imageVector = Icons.Default.Warning,
-                                        contentDescription = "局域网",
-                                        modifier = Modifier.size(14.dp),
-                                        tint = Color(0xFFFFC107)
+                            val isSelected = selectedQrAddress == info.ipv6Address ||
+                                (selectedQrAddress == null && info.preferredAddress == info.ipv6Address)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedQrAddress = info.ipv6Address },
+                                shape = MaterialTheme.shapes.small,
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "IPv6: ",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
+                                    Text(
+                                        text = "[${info.ipv6Address}]:$port",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (info.isIpv6Lan) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.Warning,
+                                            contentDescription = "局域网",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = Color(0xFFFFC107)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "已选择",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
-                        } else if (info.ipv4Address != null) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "IPv4: ",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = "${info.ipv4Address}:${serverPort}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace
-                                )
+                        }
+
+                        // IPv4 address row (clickable to select for QR)
+                        if (info.ipv4Address != null) {
+                            val isSelected = selectedQrAddress == info.ipv4Address ||
+                                (selectedQrAddress == null && info.preferredAddress == info.ipv4Address)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedQrAddress = info.ipv4Address },
+                                shape = MaterialTheme.shapes.small,
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "IPv4: ",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = "${info.ipv4Address}:$port",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (info.isIpv4Lan) {
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.Warning,
+                                            contentDescription = "局域网",
+                                            modifier = Modifier.size(14.dp),
+                                            tint = Color(0xFFFFC107)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "已选择",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
                             }
                         }
 
@@ -384,8 +447,9 @@ fun CameraPreviewScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // 二维码 - use preferred address
-                        val qrContent = wsUrl
+                        // 二维码 - use selected address
+                        val qrAddress = selectedQrAddress ?: info.preferredAddress
+                        val qrContent = cameraService?.getWsServerUrlForAddress(qrAddress) ?: wsUrl
                         if (qrContent.isNotBlank()) {
                             val qrBitmap = remember(qrContent) {
                                 generateQrBitmap(qrContent, 100)
@@ -401,7 +465,7 @@ fun CameraPreviewScreen(
                                 )
                             }
                             Text(
-                                text = "扫描二维码添加此摄像头",
+                                text = "点击上方地址切换二维码",
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.align(Alignment.CenterHorizontally)
                             )

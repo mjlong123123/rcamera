@@ -69,6 +69,8 @@ class WebSocketManager {
 
     fun getServerUrl(): String? = server?.getUrl()
 
+    fun getServerUrlForAddress(addr: String): String? = server?.getUrlForAddress(addr)
+
     fun getServerIpInfo(): IpInfo? = server?.getIpInfo()
 
     fun getServerClientCount(): Int = server?.getConnectedClientCount() ?: 0

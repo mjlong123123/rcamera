@@ -20,6 +20,9 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionFilter
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleOwner
@@ -63,6 +66,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private var isEncoding = false
     private var imageAnalysis: ImageAnalysis? = null
     private val encodingLock = Object()
+    private var encoderWidth = 1280
+    private var encoderHeight = 720
+    private var frameRotationDegrees = 0
 
     // Track client RTP ports: clientId -> rtpPort
     private val clientRtpPorts = mutableMapOf<String, Int>()
@@ -120,7 +126,16 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
     fun setSurfaceProvider(provider: Preview.SurfaceProvider) {
         surfaceProvider = provider
-        bindPreview()
+        // If currently encoding with analysis but no preview bound, rebind to add preview
+        if (isEncoding && preview == null && cameraProvider != null) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                Handler(Looper.getMainLooper()).post { openCameraWithAnalysis() }
+            } else {
+                openCameraWithAnalysis()
+            }
+        } else {
+            bindPreview()
+        }
     }
 
     fun clearSurfaceProvider() {
@@ -156,6 +171,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
     fun getWsServerUrl(): String? = wsManager.getServerUrl()
 
+    fun getWsServerUrlForAddress(addr: String): String? = wsManager.getServerUrlForAddress(addr)
+
     fun getWsServerIpInfo(): com.dragon.rcamera.websocket.IpInfo? = wsManager.getServerIpInfo()
 
     fun getWsClientCount(): Int = wsManager.getServerClientCount()
@@ -164,9 +181,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
         // Client just authenticated - send RTP info
         val host = conn.remoteSocketAddress?.address?.hostAddress ?: return
         val clientId = conn.remoteSocketAddress.toString()
+        val isIpv6 = host.contains(":")
 
         clientAddresses[clientId] = host
-        Log.d(TAG, "Client authenticated: $clientId from $host")
+        Log.d(TAG, "Client authenticated: $clientId from $host (IPv${if (isIpv6) "6" else "4"})")
 
         // If this is the first client, start encoding and RTP
         if (wsManager.getServerClientCount() == 1) {
@@ -217,13 +235,22 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 // Client requests RTP stream with its receiving port
                 val rtpPort = message.payload.get("rtp_port")?.asInt ?: return
                 val host = conn.remoteSocketAddress?.address?.hostAddress ?: return
+                val isIpv6 = host.contains(":")
 
                 clientRtpPorts[clientId] = rtpPort
                 rtpSender.addDestination(clientId, host, rtpPort)
+                Log.d(TAG, "RTP destination added: $host:$rtpPort (IPv${if (isIpv6) "6" else "4"}), sender socket bound to ${rtpSender.getLocalPort()}")
+
+                // Calculate encoded video dimensions (after rotation)
+                val needSwap = frameRotationDegrees == 90 || frameRotationDegrees == 270
+                val encodedWidth = if (needSwap) encoderHeight else encoderWidth
+                val encodedHeight = if (needSwap) encoderWidth else encoderHeight
 
                 val response = message.makeResponse(true, mapOf(
                     "rtp_started" to true,
-                    "server_rtp_port" to (rtpSender.getLocalPort())
+                    "server_rtp_port" to (rtpSender.getLocalPort()),
+                    "video_width" to encodedWidth,
+                    "video_height" to encodedHeight
                 ))
                 wsManager.sendToClient(conn, response)
 
@@ -264,10 +291,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
             try {
                 rtpSender.start()
                 wsManager.setRtpPort(rtpSender.getLocalPort())
-                startH264Encoder()
+                // Encoder will be created lazily when first frame arrives from ImageAnalysis,
+                // so we use the actual camera resolution instead of hardcoded values.
                 openCameraWithAnalysis()
                 isEncoding = true
-                Log.d(TAG, "Encoding and RTP started")
+                Log.d(TAG, "Encoding and RTP started (encoder deferred to first frame)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start encoding", e)
             }
@@ -289,15 +317,25 @@ class RemoteCameraService : Service(), LifecycleOwner {
         }
     }
 
-    private fun startH264Encoder() {
+    private fun startH264Encoder(width: Int, height: Int, rotationDegrees: Int) {
         try {
-            val width = 1280
-            val height = 720
-            val bitrate = 2_000_000 // 2 Mbps
+            // When rotation is 90 or 270, swap width/height for the encoded output
+            // since we will rotate the YUV data before feeding to the encoder.
+            val needSwap = rotationDegrees == 90 || rotationDegrees == 270
+            val encodedWidth = if (needSwap) height else width
+            val encodedHeight = if (needSwap) width else height
+            encoderWidth = width
+            encoderHeight = height
+            frameRotationDegrees = rotationDegrees
+
+            // Scale bitrate proportionally to pixel count (base: 2Mbps for 1280x720)
+            val basePixels = 1280 * 720
+            val actualPixels = encodedWidth * encodedHeight
+            val bitrate = (2_000_000L * actualPixels / basePixels).toInt().coerceIn(500_000, 8_000_000)
             val fps = 30
 
             val format = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_AVC, width, height
+                MediaFormat.MIMETYPE_VIDEO_AVC, encodedWidth, encodedHeight
             )
             format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
@@ -316,7 +354,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 start()
             }
 
-            Log.d(TAG, "H264 encoder started: ${width}x${height} @ ${fps}fps")
+            Log.d(TAG, "H264 encoder started: ${width}x${height} rot=${rotationDegrees} -> encoded ${encodedWidth}x${encodedHeight} @ ${fps}fps, bitrate=${bitrate}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start H264 encoder", e)
         }
@@ -346,22 +384,17 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 val enc = encoder ?: break
                 val outputBufferIndex = enc.dequeueOutputBuffer(info, 10000)
                 if (outputBufferIndex >= 0) {
-                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        // SPS/PPS config data
-                        val outputBuffer = enc.getOutputBuffer(outputBufferIndex)
-                        if (outputBuffer != null && rtpSender.hasDestinations()) {
-                            val configData = ByteArray(info.size)
-                            outputBuffer.position(info.offset)
-                            outputBuffer.get(configData)
-                            rtpSender.sendH264AccessUnit(configData, configData.size, info.presentationTimeUs)
-                        }
-                    } else {
-                        val outputBuffer = enc.getOutputBuffer(outputBufferIndex)
-                        if (outputBuffer != null && rtpSender.hasDestinations()) {
-                            val data = ByteArray(info.size)
-                            outputBuffer.position(info.offset)
-                            outputBuffer.get(data)
-                            rtpSender.sendH264AccessUnit(data, data.size, info.presentationTimeUs)
+                    val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    val outputBuffer = enc.getOutputBuffer(outputBufferIndex)
+                    if (outputBuffer != null) {
+                        val data = ByteArray(info.size)
+                        outputBuffer.position(info.offset)
+                        outputBuffer.get(data)
+                        // Always call sendH264AccessUnit - it will cache config data
+                        // even if there are no destinations yet
+                        rtpSender.sendH264AccessUnit(data, data.size, info.presentationTimeUs, isConfig = isConfig)
+                        if (isConfig) {
+                            Log.d(TAG, "Encoder output SPS/PPS config: ${info.size} bytes")
                         }
                     }
                     enc.releaseOutputBuffer(outputBufferIndex, false)
@@ -379,10 +412,31 @@ class RemoteCameraService : Service(), LifecycleOwner {
     /**
      * Feed camera frame to encoder.
      * Called from ImageAnalysis analyzer.
+     * Handles rotation by transforming YUV data when rotationDegrees is 90 or 270.
      */
     private fun feedFrameToEncoder(image: ImageProxy) {
-        val enc = encoder ?: return
         if (!isEncoding) return
+
+        val width = image.width
+        val height = image.height
+        val rotation = image.imageInfo.rotationDegrees
+
+        // Lazily create encoder on first frame using actual camera resolution and rotation
+        if (encoder == null) {
+            synchronized(encodingLock) {
+                if (encoder == null) {
+                    startH264Encoder(width, height, rotation)
+                }
+            }
+        }
+
+        val enc = encoder ?: return
+
+        // Dimensions must match encoder configuration
+        if (width != encoderWidth || height != encoderHeight) {
+            Log.w(TAG, "Image dimensions ($width x $height) don't match encoder ($encoderWidth x $encoderHeight), skipping frame")
+            return
+        }
 
         try {
             val index = enc.dequeueInputBuffer(0)
@@ -390,9 +444,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
             val inputBuffer = enc.getInputBuffer(index) ?: return
             inputBuffer.clear()
-
-            val width = image.width
-            val height = image.height
 
             // Convert YUV_420_888 to NV12 byte array
             val yPlane = image.planes[0]
@@ -407,24 +458,124 @@ class RemoteCameraService : Service(), LifecycleOwner {
             val uBuffer = uPlane.buffer
             val vBuffer = vPlane.buffer
 
-            // Y plane
-            for (row in 0 until height) {
-                yBuffer.position(row * yRowStride)
-                for (col in 0 until width) {
-                    inputBuffer.put(yBuffer.get())
-                    // Skip padding if rowStride > width
-                    if (col < width - 1 && yRowStride > width) {
-                        // handled by position below
+            if (rotation == 90 || rotation == 270) {
+                // Need to rotate the frame. First extract Y/U/V into compact arrays,
+                // then rotate and write to input buffer in NV12 format.
+                val rotatedWidth = height  // After 90/270 rotation
+                val rotatedHeight = width
+
+                // Extract compact Y plane
+                val yData = ByteArray(width * height)
+                for (row in 0 until height) {
+                    yBuffer.position(row * yRowStride)
+                    yBuffer.get(yData, row * width, width)
+                }
+
+                // Extract compact U and V planes
+                val uvHeight = height / 2
+                val uvWidth = width / 2
+                val uData = ByteArray(uvWidth * uvHeight)
+                val vData = ByteArray(uvWidth * uvHeight)
+                if (uvPixelStride == 1) {
+                    for (row in 0 until uvHeight) {
+                        for (col in 0 until uvWidth) {
+                            val idx = row * uvWidth + col
+                            uData[idx] = uBuffer.get(row * uvRowStride + col)
+                            vData[idx] = vBuffer.get(row * uvRowStride + col)
+                        }
+                    }
+                } else {
+                    for (row in 0 until uvHeight) {
+                        for (col in 0 until uvWidth) {
+                            val idx = row * uvWidth + col
+                            uData[idx] = uBuffer.get(row * uvRowStride + col * uvPixelStride)
+                            vData[idx] = vBuffer.get(row * uvRowStride + col * uvPixelStride)
+                        }
                     }
                 }
-            }
 
-            // UV plane (NV12: interleaved VU)
-            for (row in 0 until height / 2) {
-                for (col in 0 until width / 2) {
-                    val uvIndex = row * uvRowStride + col * uvPixelStride
-                    inputBuffer.put(vBuffer.get(uvIndex))
-                    inputBuffer.put(uBuffer.get(uvIndex))
+                // Rotate Y plane
+                val rotatedY = ByteArray(rotatedWidth * rotatedHeight)
+                val rotatedU = ByteArray(uvHeight * uvWidth)
+                val rotatedV = ByteArray(uvHeight * uvWidth)
+
+                if (rotation == 90) {
+                    // 90° CW: (x, y) -> (height - 1 - y, x)
+                    for (y in 0 until height) {
+                        for (x in 0 until width) {
+                            val srcIdx = y * width + x
+                            val dstX = height - 1 - y
+                            val dstY = x
+                            rotatedY[dstY * rotatedWidth + dstX] = yData[srcIdx]
+                        }
+                    }
+                    // Rotate UV planes (half resolution)
+                    for (y in 0 until uvHeight) {
+                        for (x in 0 until uvWidth) {
+                            val srcIdx = y * uvWidth + x
+                            val dstX = uvHeight - 1 - y
+                            val dstY = x
+                            rotatedU[dstY * uvHeight + dstX] = uData[srcIdx]
+                            rotatedV[dstY * uvHeight + dstX] = vData[srcIdx]
+                        }
+                    }
+                } else {
+                    // 270° CW (or 90° CCW): (x, y) -> (y, width - 1 - x)
+                    for (y in 0 until height) {
+                        for (x in 0 until width) {
+                            val srcIdx = y * width + x
+                            val dstX = y
+                            val dstY = width - 1 - x
+                            rotatedY[dstY * rotatedWidth + dstX] = yData[srcIdx]
+                        }
+                    }
+                    for (y in 0 until uvHeight) {
+                        for (x in 0 until uvWidth) {
+                            val srcIdx = y * uvWidth + x
+                            val dstX = y
+                            val dstY = uvWidth - 1 - x
+                            rotatedU[dstY * uvHeight + dstX] = uData[srcIdx]
+                            rotatedV[dstY * uvHeight + dstX] = vData[srcIdx]
+                        }
+                    }
+                }
+
+                // Write rotated Y
+                inputBuffer.put(rotatedY)
+
+                // Write rotated UV interleaved (NV12 format)
+                val rotatedUVCount = uvHeight * uvWidth
+                for (i in 0 until rotatedUVCount) {
+                    inputBuffer.put(rotatedU[i])
+                    inputBuffer.put(rotatedV[i])
+                }
+            } else {
+                // No rotation needed (0° or 180°) - use original logic
+                // Y plane - copy row by row to handle stride padding
+                val yRow = ByteArray(width)
+                for (row in 0 until height) {
+                    yBuffer.position(row * yRowStride)
+                    yBuffer.get(yRow, 0, width)
+                    inputBuffer.put(yRow)
+                }
+
+                // UV plane - NV12 format: interleaved UV (NOT VU)
+                if (uvPixelStride == 1) {
+                    for (row in 0 until height / 2) {
+                        for (col in 0 until width / 2) {
+                            val uvIndex = row * uvRowStride + col
+                            inputBuffer.put(uBuffer.get(uvIndex))
+                            inputBuffer.put(vBuffer.get(uvIndex))
+                        }
+                    }
+                } else {
+                    for (row in 0 until height / 2) {
+                        for (col in 0 until width / 2) {
+                            val uvIndex = row * uvRowStride + col * uvPixelStride
+                            inputBuffer.put(uBuffer.get(uvIndex))
+                            inputBuffer.put(vBuffer.get(uvIndex))
+                        }
+                    }
                 }
             }
 
@@ -454,16 +605,30 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     private fun openCamera() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { openCamera() }
+            return
+        }
         if (isCameraOpen) return
         val provider = cameraProvider ?: return
-        preview = Preview.Builder().build()
+        val sp = surfaceProvider
         try {
-            camera = provider.bindToLifecycle(
-                this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview
-            )
-            surfaceProvider?.let { provider -> preview?.setSurfaceProvider(provider) }
+            if (sp != null) {
+                preview = Preview.Builder().build().also { p ->
+                    p.setSurfaceProvider(sp)
+                }
+                camera = provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview
+                )
+            } else {
+                // No surface provider available; defer camera binding until surface is ready.
+                // The camera will be bound in setSurfaceProvider() when it becomes available.
+                preview = null
+                Log.d(TAG, "No surface provider, deferring camera binding")
+                return
+            }
             isCameraOpen = true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -471,6 +636,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     private fun closeCamera() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { closeCamera() }
+            return
+        }
         if (!isCameraOpen) return
         val provider = cameraProvider ?: return
         try {
@@ -497,12 +666,40 @@ class RemoteCameraService : Service(), LifecycleOwner {
      * This is separate from the preview-only camera.
      */
     private fun openCameraWithAnalysis() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { openCameraWithAnalysis() }
+            return
+        }
         val provider = cameraProvider ?: return
         try {
             provider.unbindAll()
 
-            preview = Preview.Builder().build()
             imageAnalysis = ImageAnalysis.Builder()
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionFilter(object : ResolutionFilter {
+                            override fun filter(
+                                supportedSizes: MutableList<android.util.Size>,
+                                rotationDegrees: Int
+                            ): MutableList<android.util.Size> {
+                                // CameraX returns raw sensor sizes (always landscape-oriented on phones).
+                                // After rotation in feedFrameToEncoder, the output will be portrait.
+                                // Prefer sizes that produce ~720p after rotation (e.g. 1280x720 -> 720x1280).
+                                // Cap at 1080p to limit bandwidth and CPU usage.
+                                val maxMegaPixels = 1920 * 1080
+                                val targetPixels = 1280 * 720 // target raw resolution before rotation
+                                val candidates = supportedSizes.filter {
+                                    it.width * it.height <= maxMegaPixels
+                                }
+                                val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
+                                return source.sortedBy {
+                                    Math.abs(it.width * it.height - targetPixels)
+                                }.toMutableList()
+                            }
+                        })
+                        .build()
+                )
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
@@ -515,15 +712,30 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     }
                 }
 
-            camera = provider.bindToLifecycle(
-                this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageAnalysis
-            )
-            surfaceProvider?.let { provider -> preview?.setSurfaceProvider(provider) }
+            // Only bind Preview if we have a surface provider; otherwise CameraX will fail
+            // with "Unable to open capture session without surfaces".
+            // ImageAnalysis alone is sufficient for RTP encoding.
+            val sp = surfaceProvider
+            if (sp != null) {
+                preview = Preview.Builder().build().also { p ->
+                    p.setSurfaceProvider(sp)
+                }
+                camera = provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    imageAnalysis
+                )
+            } else {
+                preview = null
+                camera = provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    imageAnalysis
+                )
+            }
             isCameraOpen = true
-            Log.d(TAG, "Camera opened with image analysis")
+            Log.d(TAG, "Camera opened with image analysis (preview=${sp != null})")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open camera with analysis", e)
         }
