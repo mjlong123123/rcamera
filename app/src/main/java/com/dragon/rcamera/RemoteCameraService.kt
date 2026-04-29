@@ -1,24 +1,33 @@
 package com.dragon.rcamera
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.os.Build
+import android.opengl.EGL14
+import android.opengl.EGLConfig
+import android.opengl.EGLContext
+import android.opengl.EGLDisplay
+import android.opengl.EGLExt
+import android.opengl.EGLSurface
+import android.opengl.GLES11Ext
+import android.opengl.GLES20
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.util.Size
+import android.view.Surface
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionFilter
@@ -34,7 +43,11 @@ import com.dragon.rcamera.websocket.WsMessage
 import com.dragon.rcamera.websocket.WebSocketManager
 import com.google.gson.JsonObject
 import org.java_websocket.WebSocket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class RemoteCameraService : Service(), LifecycleOwner {
 
@@ -54,6 +67,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var surfaceProvider: Preview.SurfaceProvider? = null
+    private var wrapperSurfaceProvider: Preview.SurfaceProvider? = null
+    private var useExternalPreview = false  // true when Activity uses getSurfaceProvider() mode
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val binder = LocalBinder()
@@ -64,11 +79,41 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private val rtpSender = RtpSender()
     private var encoder: MediaCodec? = null
     private var isEncoding = false
-    private var imageAnalysis: ImageAnalysis? = null
     private val encodingLock = Object()
-    private var encoderWidth = 1280
-    private var encoderHeight = 720
-    private var frameRotationDegrees = 0
+    private var encoderWidth = 720
+    private var encoderHeight = 1280
+    private var frameRotationDegrees = 90
+
+    // OpenGL/EGL for rendering camera frames to preview and encoder surfaces
+    private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
+    private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
+    private var eglConfig: EGLConfig? = null
+    private var eglPBufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE  // offscreen surface for GL init
+    private var previewSurface: Surface? = null
+    private var previewEglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var encoderSurface: Surface? = null
+    private var encoderEglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var cameraSurfaceTexture: SurfaceTexture? = null
+    private var cameraOesTextureId: Int = 0
+
+    // OpenGL state
+    private var shaderProgram: Int = 0
+    private var positionHandle: Int = 0
+    private var texCoordHandle: Int = 0
+    private var textureHandle: Int = 0
+    private var vertexBuffer: FloatBuffer? = null
+    private var texCoordBuffer: FloatBuffer? = null
+
+    private val vertexCoords = floatArrayOf(
+        -1f, -1f,  1f, -1f, -1f,  1f,  1f,  1f
+    )
+    private val texCoords = floatArrayOf(
+        1f, 1f,  1f, 0f,  0f, 1f,  0f, 0f
+    )
+
+    private var renderThread: RenderThread? = null
+    private val isFrameAvailable = AtomicBoolean(false)
+    private val frameLock = Object()
 
     // Track client RTP ports: clientId -> rtpPort
     private val clientRtpPorts = mutableMapOf<String, Int>()
@@ -115,6 +160,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         stopWebSocketServer()
         stopEncodingAndRtp()
+        releaseEncoderSurface()
+        releasePreviewSurface()
+        releaseOpenGl()
         unbindPreview()
         camera = null
         cameraProvider?.unbindAll()
@@ -124,23 +172,159 @@ class RemoteCameraService : Service(), LifecycleOwner {
         super.onDestroy()
     }
 
+    /**
+     * Set surface provider for preview.
+     * Called when Activity becomes visible.
+     * The provider is wrapped internally to redirect rendering through OpenGL.
+     */
     fun setSurfaceProvider(provider: Preview.SurfaceProvider) {
         surfaceProvider = provider
-        // If currently encoding with analysis but no preview bound, rebind to add preview
-        if (isEncoding && preview == null && cameraProvider != null) {
-            if (Looper.myLooper() != Looper.getMainLooper()) {
-                Handler(Looper.getMainLooper()).post { openCameraWithAnalysis() }
-            } else {
-                openCameraWithAnalysis()
+        bindCamera()
+    }
+
+    /**
+     * Get a surface provider for Activity to use with Preview.setSurfaceProvider().
+     * This allows Activity to create its own Preview instance while still using
+     * the Service's OpenGL rendering pipeline.
+     *
+     * Usage:
+     *   val preview = Preview.Builder().build()
+     *   preview.setSurfaceProvider(service.getSurfaceProvider())
+     *   service.bindPreviewUseCase(preview)
+     */
+    fun getSurfaceProvider(): Preview.SurfaceProvider {
+        return Preview.SurfaceProvider { request ->
+            val resolution = request.resolution
+
+            // Initialize OpenGL if not already done (creates SurfaceTexture)
+            if (!initializeOpenGl()) {
+                Log.e(TAG, "Failed to initialize OpenGL for getSurfaceProvider()")
+                return@SurfaceProvider
             }
-        } else {
-            bindPreview()
+
+            val surfaceTexture = cameraSurfaceTexture
+            if (surfaceTexture == null) {
+                Log.e(TAG, "No SurfaceTexture available after OpenGL init")
+                return@SurfaceProvider
+            }
+
+            surfaceTexture.setDefaultBufferSize(resolution.width, resolution.height)
+            val surface = Surface(surfaceTexture)
+
+            // Provide surface to CameraX
+            request.provideSurface(surface, cameraExecutor) { result ->
+                Log.d(TAG, "Camera surface released via getSurfaceProvider()")
+            }
+
+            // Start render thread if not running
+            startRenderThreadIfNeeded()
         }
     }
 
+    /**
+     * Bind an externally-created Preview use case to the camera.
+     * Call this after setting the surface provider via getSurfaceProvider().
+     */
+    /**
+     * Bind an externally-created Preview use case to the camera.
+     * Call this after setting the surface provider via getSurfaceProvider().
+     */
+    fun bindPreviewUseCase(previewUseCase: Preview) {
+        useExternalPreview = true
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { bindPreviewUseCase(previewUseCase) }
+            return
+        }
+
+        val provider = cameraProvider
+        if (provider == null) {
+            // cameraProvider not ready yet, retry after a delay
+            Handler(Looper.getMainLooper()).postDelayed({ bindPreviewUseCase(previewUseCase) }, 100)
+            return
+        }
+        if (isCameraOpen) return
+
+        try {
+            provider.unbindAll()
+
+            // Initialize OpenGL if not done
+            if (!initializeOpenGl()) {
+                Log.e(TAG, "Failed to initialize OpenGL for bindPreviewUseCase")
+                return
+            }
+
+            camera = provider.bindToLifecycle(
+                this,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                previewUseCase
+            )
+            isCameraOpen = true
+            Log.d(TAG, "Camera bound with external preview use case (isEncoding=$isEncoding)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to bind preview use case", e)
+        }
+    }
+
+    /**
+     * Set preview surface directly for OpenGL rendering.
+     * Call this when Activity's TextureView/SurfaceView surface is ready.
+     * This method can be called in TextureView.SurfaceTextureListener.onSurfaceTextureAvailable()
+     * or SurfaceView.SurfaceHolder.Callback.surfaceCreated().
+     */
+    fun setPreviewSurface(surface: Surface?) {
+        if (surface == null) {
+            releasePreviewSurface()
+            return
+        }
+
+        if (!initializeOpenGl()) {
+            Log.e(TAG, "Failed to initialize OpenGL")
+            return
+        }
+
+        // Only release the old EGL surface, do NOT stop the render thread.
+        // releasePreviewSurface() would stop the render thread when there's no
+        // encoder surface, and then we can't restart it (Java Thread cannot be
+        // restarted after stop). Since we're about to set a new preview surface,
+        // the render thread should keep running.
+        try {
+            if (previewEglSurface != EGL14.EGL_NO_SURFACE) {
+                makeCurrent(previewEglSurface)
+                EGL14.eglDestroySurface(eglDisplay, previewEglSurface)
+                previewEglSurface = EGL14.EGL_NO_SURFACE
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing old preview EGL surface", e)
+        }
+        previewSurface = null
+
+        try {
+            previewSurface = surface
+            previewEglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, surface, null, 0)
+
+            // Start render thread if not running
+            startRenderThreadIfNeeded()
+
+            Log.d(TAG, "Preview surface set via setPreviewSurface()")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set preview surface", e)
+            releasePreviewSurface()
+        }
+    }
+
+    /**
+     * Clear surface provider.
+     * Called when Activity is paused/destroyed.
+     */
     fun clearSurfaceProvider() {
         surfaceProvider = null
-        unbindPreview()
+        wrapperSurfaceProvider = null
+        useExternalPreview = false
+        releasePreviewSurface()
+        // Check if we should close camera
+        if (!hasEncoderSurface() && !hasPreviewSurface()) {
+            closeCamera()
+        }
     }
 
     // ===== WebSocket Server =====
@@ -178,7 +362,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
     fun getWsClientCount(): Int = wsManager.getServerClientCount()
 
     private fun handleClientAuthenticated(conn: WebSocket) {
-        // Client just authenticated - send RTP info
         val host = conn.remoteSocketAddress?.address?.hostAddress ?: return
         val clientId = conn.remoteSocketAddress.toString()
         val isIpv6 = host.contains(":")
@@ -186,7 +369,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
         clientAddresses[clientId] = host
         Log.d(TAG, "Client authenticated: $clientId from $host (IPv${if (isIpv6) "6" else "4"})")
 
-        // If this is the first client, start encoding and RTP
         if (wsManager.getServerClientCount() == 1) {
             startEncodingAndRtp()
         }
@@ -195,12 +377,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private fun handleClientDisconnected(conn: WebSocket) {
         val clientId = conn.remoteSocketAddress.toString()
 
-        // Remove RTP destination
         rtpSender.removeDestination(clientId)
         clientRtpPorts.remove(clientId)
         clientAddresses.remove(clientId)
 
-        // If no clients left, stop encoding and RTP
         if (wsManager.getServerClientCount() == 0) {
             stopEncodingAndRtp()
         }
@@ -232,7 +412,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 wsManager.sendToClient(conn, response)
             }
             WsMessage.ACTION_START_RTP -> {
-                // Client requests RTP stream with its receiving port
                 val rtpPort = message.payload.get("rtp_port")?.asInt ?: return
                 val host = conn.remoteSocketAddress?.address?.hostAddress ?: return
                 val isIpv6 = host.contains(":")
@@ -241,7 +420,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 rtpSender.addDestination(clientId, host, rtpPort)
                 Log.d(TAG, "RTP destination added: $host:$rtpPort (IPv${if (isIpv6) "6" else "4"}), sender socket bound to ${rtpSender.getLocalPort()}")
 
-                // Calculate encoded video dimensions (after rotation)
                 val needSwap = frameRotationDegrees == 90 || frameRotationDegrees == 270
                 val encodedWidth = if (needSwap) encoderHeight else encoderWidth
                 val encodedHeight = if (needSwap) encoderWidth else encoderHeight
@@ -254,7 +432,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 ))
                 wsManager.sendToClient(conn, response)
 
-                // Ensure encoding is running
                 if (!isEncoding) {
                     startEncodingAndRtp()
                 }
@@ -266,7 +443,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 val response = message.makeResponse(true, mapOf("rtp_stopped" to true))
                 wsManager.sendToClient(conn, response)
 
-                // If no RTP destinations, stop encoding
                 if (!rtpSender.hasDestinations()) {
                     stopEncodingAndRtp()
                 }
@@ -283,6 +459,421 @@ class RemoteCameraService : Service(), LifecycleOwner {
         wsManager.broadcastToClients(msg)
     }
 
+    // ===== OpenGL =====
+
+    private fun initializeOpenGl(): Boolean {
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) return true
+
+        synchronized(this) {
+            // Double-check after acquiring lock
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY) return true
+
+            eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+            Log.e(TAG, "Unable to get EGL display")
+            return false
+            }
+
+            val version = IntArray(2)
+            if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
+            Log.e(TAG, "Unable to initialize EGL")
+            return false
+            }
+
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val numConfigs = IntArray(1)
+
+            // First try with EGL_RECORDABLE_ANDROID for encoder support
+            var configAttribs = intArrayOf(
+            EGL14.EGL_RED_SIZE, 8,
+            EGL14.EGL_GREEN_SIZE, 8,
+            EGL14.EGL_BLUE_SIZE, 8,
+            EGL14.EGL_ALPHA_SIZE, 8,
+            EGL14.EGL_DEPTH_SIZE, 0,
+            EGL14.EGL_RENDERABLE_TYPE, 4, // EGL_OPENGL_ES2_BIT
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT or 0x314,  // EGL_RECORDABLE_ANDROID
+            EGL14.EGL_NONE
+            )
+
+            if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0) || numConfigs[0] == 0) {
+            Log.w(TAG, "EGL config with EGL_RECORDABLE_ANDROID not found, trying without")
+            // Fallback without EGL_RECORDABLE_ANDROID
+            configAttribs = intArrayOf(
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_DEPTH_SIZE, 0,
+                EGL14.EGL_RENDERABLE_TYPE, 4, // EGL_OPENGL_ES2_BIT
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+            )
+            if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
+                Log.e(TAG, "Unable to choose EGL config")
+                return false
+            }
+            }
+            eglConfig = configs[0]
+
+            val contextAttribs = intArrayOf(
+            EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL14.EGL_NONE
+            )
+            eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            Log.e(TAG, "Unable to create EGL context")
+            return false
+            }
+
+            // Create a PBuffer surface so we can make the context current for GL operations
+            val pbufferAttribs = intArrayOf(
+            EGL14.EGL_WIDTH, 1,
+            EGL14.EGL_HEIGHT, 1,
+            EGL14.EGL_NONE
+            )
+            eglPBufferSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbufferAttribs, 0)
+            if (eglPBufferSurface == EGL14.EGL_NO_SURFACE) {
+            Log.e(TAG, "Unable to create EGL PBuffer surface")
+            return false
+            }
+
+            // Make context current before any GL calls
+            if (!EGL14.eglMakeCurrent(eglDisplay, eglPBufferSurface, eglPBufferSurface, eglContext)) {
+            Log.e(TAG, "Unable to make EGL context current")
+            return false
+            }
+
+            // Setup buffers
+            vertexBuffer = ByteBuffer.allocateDirect(vertexCoords.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(vertexCoords)
+            vertexBuffer?.position(0)
+
+            texCoordBuffer = ByteBuffer.allocateDirect(texCoords.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(texCoords)
+            texCoordBuffer?.position(0)
+
+            // Create OES texture for camera
+            val textures = IntArray(1)
+            GLES20.glGenTextures(1, textures, 0)
+            cameraOesTextureId = textures[0]
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraOesTextureId)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+            // Create shader program
+            if (!setupShaders()) {
+            Log.e(TAG, "Failed to setup shaders")
+            return false
+            }
+
+            // Create SurfaceTexture
+            cameraSurfaceTexture = SurfaceTexture(cameraOesTextureId)
+            cameraSurfaceTexture?.setOnFrameAvailableListener {
+            synchronized(frameLock) {
+                isFrameAvailable.set(true)
+                frameLock.notifyAll()
+            }
+            }
+
+            // Release context from this thread so RenderThread can make it current
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+
+            Log.d(TAG, "OpenGL initialized")
+            return true
+        } // synchronized
+    }
+
+    private fun setupShaders(): Boolean {
+        val vertexShader = GLES20.glCreateShader(GLES20.GL_VERTEX_SHADER)
+        GLES20.glShaderSource(vertexShader, """
+            attribute vec4 aPosition;
+            attribute vec2 aTexCoord;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_Position = aPosition;
+                vTexCoord = aTexCoord;
+            }
+        """.trimIndent())
+        GLES20.glCompileShader(vertexShader)
+
+        val fragmentShader = GLES20.glCreateShader(GLES20.GL_FRAGMENT_SHADER)
+        GLES20.glShaderSource(fragmentShader, """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform samplerExternalOES uTexture;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+        """.trimIndent())
+        GLES20.glCompileShader(fragmentShader)
+
+        shaderProgram = GLES20.glCreateProgram()
+        GLES20.glAttachShader(shaderProgram, vertexShader)
+        GLES20.glAttachShader(shaderProgram, fragmentShader)
+        GLES20.glLinkProgram(shaderProgram)
+
+        GLES20.glDeleteShader(vertexShader)
+        GLES20.glDeleteShader(fragmentShader)
+
+        positionHandle = GLES20.glGetAttribLocation(shaderProgram, "aPosition")
+        texCoordHandle = GLES20.glGetAttribLocation(shaderProgram, "aTexCoord")
+        textureHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexture")
+
+        return true
+    }
+
+    private fun releaseOpenGl() {
+        stopRenderThread()
+
+        if (shaderProgram != 0) {
+            GLES20.glDeleteProgram(shaderProgram)
+            shaderProgram = 0
+        }
+        if (cameraOesTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(cameraOesTextureId), 0)
+            cameraOesTextureId = 0
+        }
+        cameraSurfaceTexture?.release()
+        cameraSurfaceTexture = null
+
+        if (eglPBufferSurface != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglDestroySurface(eglDisplay, eglPBufferSurface)
+            eglPBufferSurface = EGL14.EGL_NO_SURFACE
+        }
+        if (eglContext != EGL14.EGL_NO_CONTEXT) {
+            EGL14.eglDestroyContext(eglDisplay, eglContext)
+            eglContext = EGL14.EGL_NO_CONTEXT
+        }
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglTerminate(eglDisplay)
+            eglDisplay = EGL14.EGL_NO_DISPLAY
+        }
+
+        Log.d(TAG, "OpenGL released")
+    }
+
+    private fun releasePreviewSurface() {
+        try {
+            if (previewEglSurface != EGL14.EGL_NO_SURFACE) {
+                makeCurrent(previewEglSurface)
+                EGL14.eglDestroySurface(eglDisplay, previewEglSurface)
+                previewEglSurface = EGL14.EGL_NO_SURFACE
+            }
+            previewSurface = null
+
+            // Stop render thread if no surfaces remain
+            if (!hasEncoderSurface()) {
+                stopRenderThread()
+            }
+
+            Log.d(TAG, "Preview surface released")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing preview surface", e)
+        }
+    }
+
+    /**
+     * Set encoder surface for MediaCodec input.
+     */
+    fun setEncoderSurface(surface: Surface?) {
+        if (surface == null) {
+            releaseEncoderSurface()
+            return
+        }
+
+        if (!initializeOpenGl()) {
+            Log.e(TAG, "Failed to initialize OpenGL")
+            return
+        }
+
+        releaseEncoderSurface()
+
+        try {
+            encoderSurface = surface
+            encoderEglSurface = EGL14.eglCreateWindowSurface(eglDisplay, eglConfig, surface, null, 0)
+
+            // Start render thread if not running
+            startRenderThreadIfNeeded()
+
+            Log.d(TAG, "Encoder surface set")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to set encoder surface", e)
+            releaseEncoderSurface()
+        }
+    }
+
+    private fun releaseEncoderSurface() {
+        try {
+            if (encoderEglSurface != EGL14.EGL_NO_SURFACE) {
+                makeCurrent(encoderEglSurface)
+                EGL14.eglDestroySurface(eglDisplay, encoderEglSurface)
+                encoderEglSurface = EGL14.EGL_NO_SURFACE
+            }
+            encoderSurface = null
+
+            // Stop render thread if no surfaces
+            if (!hasPreviewSurface()) {
+                stopRenderThread()
+            }
+
+            Log.d(TAG, "Encoder surface released")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing encoder surface", e)
+        }
+    }
+
+    fun hasPreviewSurface(): Boolean = previewSurface != null
+    fun hasEncoderSurface(): Boolean = encoderSurface != null
+    fun hasAnySurface(): Boolean = hasPreviewSurface() || hasEncoderSurface()
+
+    /**
+     * Start render thread if not already running.
+     * Creates a new RenderThread instance if the previous one has stopped
+     * (Java Thread objects cannot be restarted).
+     */
+    private fun startRenderThreadIfNeeded() {
+        val current = renderThread
+        if (current != null && current.isRunning) return
+
+        renderThread = RenderThread().also { it.start() }
+    }
+
+    /**
+     * Stop the render thread and wait for it to finish.
+     */
+    private fun stopRenderThread() {
+        renderThread?.stopRendering()
+        try {
+            renderThread?.join(1000)
+        } catch (_: Exception) {}
+        renderThread = null
+    }
+
+    private fun makeCurrent(eglSurface: EGLSurface): Boolean {
+        return EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+    }
+
+    private fun renderFrame(eglSurface: EGLSurface) {
+        if (!makeCurrent(eglSurface)) {
+            Log.e(TAG, "renderFrame: Failed to make EGL context current")
+            return
+        }
+
+        // Query the actual surface dimensions and set viewport accordingly
+        val surfaceWidth = IntArray(1)
+        val surfaceHeight = IntArray(1)
+        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, surfaceWidth, 0)
+        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, surfaceHeight, 0)
+        GLES20.glViewport(0, 0, surfaceWidth[0], surfaceHeight[0])
+
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+        GLES20.glUseProgram(shaderProgram)
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraOesTextureId)
+        GLES20.glUniform1i(textureHandle, 0)
+
+        GLES20.glEnableVertexAttribArray(positionHandle)
+        GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
+
+        GLES20.glEnableVertexAttribArray(texCoordHandle)
+        GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+        GLES20.glDisableVertexAttribArray(positionHandle)
+        GLES20.glDisableVertexAttribArray(texCoordHandle)
+
+        // Set presentation time for encoder surface from camera frame timestamp
+        if (eglSurface == encoderEglSurface) {
+            val timestamp = cameraSurfaceTexture?.timestamp ?: 0L
+            if (timestamp > 0) {
+                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, timestamp)
+            }
+        }
+
+        EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+    }
+
+    /**
+     * Background thread for rendering camera frames.
+     */
+    private inner class RenderThread : Thread("CameraRenderThread") {
+        @Volatile
+        var isRunning = false
+            private set
+
+        override fun run() {
+            isRunning = true
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_VIDEO)
+
+            Log.d(TAG, "Render thread started")
+
+            while (isRunning) {
+                try {
+                    // Wait for frame
+                    synchronized(frameLock) {
+                        while (!isFrameAvailable.get() && isRunning) {
+                            try {
+                                frameLock.wait(100)
+                            } catch (e: InterruptedException) {
+                                break
+                            }
+                        }
+                    }
+
+                    if (!isRunning) break
+                    isFrameAvailable.set(false)
+
+                    // Make EGL context current before updateTexImage
+                    // (SurfaceTexture.updateTexImage requires the EGL context that created the texture to be current)
+                    if (!makeCurrent(eglPBufferSurface)) {
+                        Log.e(TAG, "Failed to make EGL context current for updateTexImage")
+                        continue
+                    }
+
+                    // Update texture from SurfaceTexture
+                    cameraSurfaceTexture?.updateTexImage()
+
+                    // Get the texture timestamp for debugging
+                    val timestamp = cameraSurfaceTexture?.timestamp ?: 0L
+
+                    // Render to all available surfaces
+                    if (previewEglSurface != EGL14.EGL_NO_SURFACE) {
+                        renderFrame(previewEglSurface)
+                    }
+                    if (encoderEglSurface != EGL14.EGL_NO_SURFACE) {
+                        renderFrame(encoderEglSurface)
+                    }
+                } catch (e: Exception) {
+                    if (isRunning) {
+                        Log.e(TAG, "Render loop error", e)
+                    }
+                }
+            }
+
+            Log.d(TAG, "Render thread stopped")
+            isRunning = false
+        }
+
+        fun stopRendering() {
+            isRunning = false
+            synchronized(frameLock) {
+                isFrameAvailable.set(true)
+                frameLock.notifyAll()
+            }
+        }
+    }
+
     // ===== RTP / Encoding =====
 
     private fun startEncodingAndRtp() {
@@ -291,11 +882,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
             try {
                 rtpSender.start()
                 wsManager.setRtpPort(rtpSender.getLocalPort())
-                // Encoder will be created lazily when first frame arrives from ImageAnalysis,
-                // so we use the actual camera resolution instead of hardcoded values.
-                openCameraWithAnalysis()
+                createEncoderSurface()
                 isEncoding = true
-                Log.d(TAG, "Encoding and RTP started (encoder deferred to first frame)")
+                Log.d(TAG, "Encoding and RTP started with surface input")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start encoding", e)
             }
@@ -306,47 +895,40 @@ class RemoteCameraService : Service(), LifecycleOwner {
         synchronized(encodingLock) {
             if (!isEncoding) return
             isEncoding = false
+            releaseEncoderSurface()
             stopH264Encoder()
             rtpSender.stop()
             clientRtpPorts.clear()
             clientAddresses.clear()
-            imageAnalysis = null
-            // Re-open camera in preview-only mode
-            openCamera()
-            Log.d(TAG, "Encoding and RTP stopped, camera resumed preview")
+            Log.d(TAG, "Encoding and RTP stopped")
         }
     }
 
-    private fun startH264Encoder(width: Int, height: Int, rotationDegrees: Int) {
+    /**
+     * Create encoder surface for MediaCodec input.
+     */
+    private fun createEncoderSurface() {
+        val format = MediaFormat.createVideoFormat(
+            MediaFormat.MIMETYPE_VIDEO_AVC, encoderWidth, encoderHeight
+        )
+        // Required encoding parameters
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000)  // 2 Mbps
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)  // I-frame every 2 seconds
+        // Use surface-based input
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+
         try {
-            // When rotation is 90 or 270, swap width/height for the encoded output
-            // since we will rotate the YUV data before feeding to the encoder.
-            val needSwap = rotationDegrees == 90 || rotationDegrees == 270
-            val encodedWidth = if (needSwap) height else width
-            val encodedHeight = if (needSwap) width else height
-            encoderWidth = width
-            encoderHeight = height
-            frameRotationDegrees = rotationDegrees
-
-            // Scale bitrate proportionally to pixel count (base: 2Mbps for 1280x720)
-            val basePixels = 1280 * 720
-            val actualPixels = encodedWidth * encodedHeight
-            val bitrate = (2_000_000L * actualPixels / basePixels).toInt().coerceIn(500_000, 8_000_000)
-            val fps = 30
-
-            val format = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_AVC, encodedWidth, encodedHeight
-            )
-            format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            // Use synchronous mode - input from ImageAnalysis, output from drain thread
             encoder?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoderSurface = encoder?.createInputSurface()
             encoder?.start()
+
+            // Set encoder surface for OpenGL rendering
+            encoderSurface?.let { surface ->
+                setEncoderSurface(surface)
+            }
 
             // Start output drain thread
             drainThread = Thread({ drainEncoderLoop() }, "EncoderDrainThread").apply {
@@ -354,14 +936,14 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 start()
             }
 
-            Log.d(TAG, "H264 encoder started: ${width}x${height} rot=${rotationDegrees} -> encoded ${encodedWidth}x${encodedHeight} @ ${fps}fps, bitrate=${bitrate}")
+            Log.d(TAG, "H264 encoder started with surface input: ${encoderWidth}x${encoderHeight}")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start H264 encoder", e)
+            Log.e(TAG, "Failed to create encoder surface", e)
+            releaseEncoderSurface()
         }
     }
 
     private fun stopH264Encoder() {
-        isEncoding = false
         try {
             drainThread?.join(1000)
         } catch (_: Exception) {}
@@ -390,8 +972,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
                         val data = ByteArray(info.size)
                         outputBuffer.position(info.offset)
                         outputBuffer.get(data)
-                        // Always call sendH264AccessUnit - it will cache config data
-                        // even if there are no destinations yet
                         rtpSender.sendH264AccessUnit(data, data.size, info.presentationTimeUs, isConfig = isConfig)
                         if (isConfig) {
                             Log.d(TAG, "Encoder output SPS/PPS config: ${info.size} bytes")
@@ -410,184 +990,13 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     /**
-     * Feed camera frame to encoder.
-     * Called from ImageAnalysis analyzer.
-     * Handles rotation by transforming YUV data when rotationDegrees is 90 or 270.
+     * Check if encoding should stop when encoder surface is removed.
      */
-    private fun feedFrameToEncoder(image: ImageProxy) {
+    private fun checkAndStopEncodingIfNeeded() {
         if (!isEncoding) return
-
-        val width = image.width
-        val height = image.height
-        val rotation = image.imageInfo.rotationDegrees
-
-        // Lazily create encoder on first frame using actual camera resolution and rotation
-        if (encoder == null) {
-            synchronized(encodingLock) {
-                if (encoder == null) {
-                    startH264Encoder(width, height, rotation)
-                }
-            }
-        }
-
-        val enc = encoder ?: return
-
-        // Dimensions must match encoder configuration
-        if (width != encoderWidth || height != encoderHeight) {
-            Log.w(TAG, "Image dimensions ($width x $height) don't match encoder ($encoderWidth x $encoderHeight), skipping frame")
-            return
-        }
-
-        try {
-            val index = enc.dequeueInputBuffer(0)
-            if (index < 0) return // No input buffer available
-
-            val inputBuffer = enc.getInputBuffer(index) ?: return
-            inputBuffer.clear()
-
-            // Convert YUV_420_888 to NV12 byte array
-            val yPlane = image.planes[0]
-            val uPlane = image.planes[1]
-            val vPlane = image.planes[2]
-
-            val yRowStride = yPlane.rowStride
-            val uvRowStride = uPlane.rowStride
-            val uvPixelStride = uPlane.pixelStride
-
-            val yBuffer = yPlane.buffer
-            val uBuffer = uPlane.buffer
-            val vBuffer = vPlane.buffer
-
-            if (rotation == 90 || rotation == 270) {
-                // Need to rotate the frame. First extract Y/U/V into compact arrays,
-                // then rotate and write to input buffer in NV12 format.
-                val rotatedWidth = height  // After 90/270 rotation
-                val rotatedHeight = width
-
-                // Extract compact Y plane
-                val yData = ByteArray(width * height)
-                for (row in 0 until height) {
-                    yBuffer.position(row * yRowStride)
-                    yBuffer.get(yData, row * width, width)
-                }
-
-                // Extract compact U and V planes
-                val uvHeight = height / 2
-                val uvWidth = width / 2
-                val uData = ByteArray(uvWidth * uvHeight)
-                val vData = ByteArray(uvWidth * uvHeight)
-                if (uvPixelStride == 1) {
-                    for (row in 0 until uvHeight) {
-                        for (col in 0 until uvWidth) {
-                            val idx = row * uvWidth + col
-                            uData[idx] = uBuffer.get(row * uvRowStride + col)
-                            vData[idx] = vBuffer.get(row * uvRowStride + col)
-                        }
-                    }
-                } else {
-                    for (row in 0 until uvHeight) {
-                        for (col in 0 until uvWidth) {
-                            val idx = row * uvWidth + col
-                            uData[idx] = uBuffer.get(row * uvRowStride + col * uvPixelStride)
-                            vData[idx] = vBuffer.get(row * uvRowStride + col * uvPixelStride)
-                        }
-                    }
-                }
-
-                // Rotate Y plane
-                val rotatedY = ByteArray(rotatedWidth * rotatedHeight)
-                val rotatedU = ByteArray(uvHeight * uvWidth)
-                val rotatedV = ByteArray(uvHeight * uvWidth)
-
-                if (rotation == 90) {
-                    // 90° CW: (x, y) -> (height - 1 - y, x)
-                    for (y in 0 until height) {
-                        for (x in 0 until width) {
-                            val srcIdx = y * width + x
-                            val dstX = height - 1 - y
-                            val dstY = x
-                            rotatedY[dstY * rotatedWidth + dstX] = yData[srcIdx]
-                        }
-                    }
-                    // Rotate UV planes (half resolution)
-                    for (y in 0 until uvHeight) {
-                        for (x in 0 until uvWidth) {
-                            val srcIdx = y * uvWidth + x
-                            val dstX = uvHeight - 1 - y
-                            val dstY = x
-                            rotatedU[dstY * uvHeight + dstX] = uData[srcIdx]
-                            rotatedV[dstY * uvHeight + dstX] = vData[srcIdx]
-                        }
-                    }
-                } else {
-                    // 270° CW (or 90° CCW): (x, y) -> (y, width - 1 - x)
-                    for (y in 0 until height) {
-                        for (x in 0 until width) {
-                            val srcIdx = y * width + x
-                            val dstX = y
-                            val dstY = width - 1 - x
-                            rotatedY[dstY * rotatedWidth + dstX] = yData[srcIdx]
-                        }
-                    }
-                    for (y in 0 until uvHeight) {
-                        for (x in 0 until uvWidth) {
-                            val srcIdx = y * uvWidth + x
-                            val dstX = y
-                            val dstY = uvWidth - 1 - x
-                            rotatedU[dstY * uvHeight + dstX] = uData[srcIdx]
-                            rotatedV[dstY * uvHeight + dstX] = vData[srcIdx]
-                        }
-                    }
-                }
-
-                // Write rotated Y
-                inputBuffer.put(rotatedY)
-
-                // Write rotated UV interleaved (NV12 format)
-                val rotatedUVCount = uvHeight * uvWidth
-                for (i in 0 until rotatedUVCount) {
-                    inputBuffer.put(rotatedU[i])
-                    inputBuffer.put(rotatedV[i])
-                }
-            } else {
-                // No rotation needed (0° or 180°) - use original logic
-                // Y plane - copy row by row to handle stride padding
-                val yRow = ByteArray(width)
-                for (row in 0 until height) {
-                    yBuffer.position(row * yRowStride)
-                    yBuffer.get(yRow, 0, width)
-                    inputBuffer.put(yRow)
-                }
-
-                // UV plane - NV12 format: interleaved UV (NOT VU)
-                if (uvPixelStride == 1) {
-                    for (row in 0 until height / 2) {
-                        for (col in 0 until width / 2) {
-                            val uvIndex = row * uvRowStride + col
-                            inputBuffer.put(uBuffer.get(uvIndex))
-                            inputBuffer.put(vBuffer.get(uvIndex))
-                        }
-                    }
-                } else {
-                    for (row in 0 until height / 2) {
-                        for (col in 0 until width / 2) {
-                            val uvIndex = row * uvRowStride + col * uvPixelStride
-                            inputBuffer.put(uBuffer.get(uvIndex))
-                            inputBuffer.put(vBuffer.get(uvIndex))
-                        }
-                    }
-                }
-            }
-
-            enc.queueInputBuffer(
-                index,
-                0,
-                inputBuffer.position(),
-                System.nanoTime() / 1000,
-                0
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Error feeding frame to encoder", e)
+        if (!rtpSender.hasDestinations() && wsManager.getServerClientCount() == 0) {
+            Log.d(TAG, "No clients, stopping encoding")
+            stopEncodingAndRtp()
         }
     }
 
@@ -599,40 +1008,104 @@ class RemoteCameraService : Service(), LifecycleOwner {
             cameraProvider = future.get()
             Handler(Looper.getMainLooper()).post {
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
-                openCamera()
+                // Don't auto-bind here; binding is triggered by:
+                // - setSurfaceProvider() (old mode)
+                // - bindPreviewUseCase() (getSurfaceProvider mode)
+                // - bindCamera() (internal/WiFi client mode)
             }
         }, cameraExecutor)
     }
 
-    private fun openCamera() {
+    @SuppressLint("UnsafeOptInUsageError")
+    private fun bindCamera() {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            Handler(Looper.getMainLooper()).post { openCamera() }
+            Handler(Looper.getMainLooper()).post { bindCamera() }
             return
         }
-        if (isCameraOpen) return
+
         val provider = cameraProvider ?: return
-        val sp = surfaceProvider
+        if (isCameraOpen) return
+
         try {
-            if (sp != null) {
-                preview = Preview.Builder().build().also { p ->
-                    p.setSurfaceProvider(sp)
-                }
-                camera = provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview
-                )
-            } else {
-                // No surface provider available; defer camera binding until surface is ready.
-                // The camera will be bound in setSurfaceProvider() when it becomes available.
-                preview = null
-                Log.d(TAG, "No surface provider, deferring camera binding")
+            provider.unbindAll()
+
+            // Initialize OpenGL if not done
+            if (!initializeOpenGl()) {
+                Log.e(TAG, "Failed to initialize OpenGL")
                 return
             }
+
+            // When using getSurfaceProvider() mode, Activity creates its own Preview
+            // and binds it to the service's lifecycle. Just bind the use case.
+            // Only create a service-owned Preview if no external provider is set.
+            if (!useExternalPreview && surfaceProvider == null && wrapperSurfaceProvider == null) {
+                // Create service-owned Preview
+                preview = Preview.Builder()
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                            .setResolutionFilter(object : ResolutionFilter {
+                                override fun filter(
+                                    supportedSizes: MutableList<android.util.Size>,
+                                    rotationDegrees: Int
+                                ): MutableList<android.util.Size> {
+                                    val maxMegaPixels = 1920 * 1080
+                                    val targetPixels = 1280 * 720
+                                    val candidates = supportedSizes.filter {
+                                        it.width * it.height <= maxMegaPixels
+                                    }
+                                    val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
+                                    return source.sortedBy {
+                                        Math.abs(it.width * it.height - targetPixels)
+                                    }.toMutableList()
+                                }
+                            })
+                            .build()
+                    )
+                    .build()
+
+                val surfaceTexture = cameraSurfaceTexture
+                if (surfaceTexture == null) {
+                    Log.e(TAG, "No SurfaceTexture available")
+                    return
+                }
+
+                preview?.setSurfaceProvider(object : Preview.SurfaceProvider {
+                    override fun onSurfaceRequested(request: androidx.camera.core.SurfaceRequest) {
+                        val resolution = request.resolution
+                        surfaceTexture.setDefaultBufferSize(resolution.width, resolution.height)
+                        val surface = Surface(surfaceTexture)
+                        request.provideSurface(surface, cameraExecutor) { result ->
+                            Log.d(TAG, "Camera surface released")
+                            surface.release()
+                        }
+                    }
+                })
+            } else {
+                Log.d(TAG, "Skipping auto surface provider setup (using getSurfaceProvider() mode)")
+            }
+
+            // Bind to lifecycle
+            camera = provider.bindToLifecycle(
+                this,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview
+            )
+
             isCameraOpen = true
+            Log.d(TAG, "Camera bound with preview (isEncoding=$isEncoding)")
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to bind camera", e)
         }
+    }
+
+    private fun unbindPreview() {
+        preview?.setSurfaceProvider(null)
+        preview = null
+    }
+
+    private fun openCamera() {
+        bindCamera()
     }
 
     private fun closeCamera() {
@@ -648,96 +1121,17 @@ class RemoteCameraService : Service(), LifecycleOwner {
             preview = null
             isCameraOpen = false
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error closing camera", e)
         }
-    }
-
-    private fun bindPreview() {
-        val p = preview ?: return
-        surfaceProvider?.let { provider -> p.setSurfaceProvider(provider) }
-    }
-
-    private fun unbindPreview() {
-        preview?.setSurfaceProvider(null)
     }
 
     /**
-     * Start camera with image analysis for encoding.
-     * This is separate from the preview-only camera.
+     * Check if camera should be closed (no preview and no encoder surface).
      */
-    private fun openCameraWithAnalysis() {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            Handler(Looper.getMainLooper()).post { openCameraWithAnalysis() }
-            return
-        }
-        val provider = cameraProvider ?: return
-        try {
-            provider.unbindAll()
-
-            imageAnalysis = ImageAnalysis.Builder()
-                .setResolutionSelector(
-                    ResolutionSelector.Builder()
-                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-                        .setResolutionFilter(object : ResolutionFilter {
-                            override fun filter(
-                                supportedSizes: MutableList<android.util.Size>,
-                                rotationDegrees: Int
-                            ): MutableList<android.util.Size> {
-                                // CameraX returns raw sensor sizes (always landscape-oriented on phones).
-                                // After rotation in feedFrameToEncoder, the output will be portrait.
-                                // Prefer sizes that produce ~720p after rotation (e.g. 1280x720 -> 720x1280).
-                                // Cap at 1080p to limit bandwidth and CPU usage.
-                                val maxMegaPixels = 1920 * 1080
-                                val targetPixels = 1280 * 720 // target raw resolution before rotation
-                                val candidates = supportedSizes.filter {
-                                    it.width * it.height <= maxMegaPixels
-                                }
-                                val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
-                                return source.sortedBy {
-                                    Math.abs(it.width * it.height - targetPixels)
-                                }.toMutableList()
-                            }
-                        })
-                        .build()
-                )
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                .build()
-                .also { analysis ->
-                    analysis.setAnalyzer(cameraExecutor) { image ->
-                        if (isEncoding) {
-                            feedFrameToEncoder(image)
-                        }
-                        image.close()
-                    }
-                }
-
-            // Only bind Preview if we have a surface provider; otherwise CameraX will fail
-            // with "Unable to open capture session without surfaces".
-            // ImageAnalysis alone is sufficient for RTP encoding.
-            val sp = surfaceProvider
-            if (sp != null) {
-                preview = Preview.Builder().build().also { p ->
-                    p.setSurfaceProvider(sp)
-                }
-                camera = provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    imageAnalysis
-                )
-            } else {
-                preview = null
-                camera = provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    imageAnalysis
-                )
-            }
-            isCameraOpen = true
-            Log.d(TAG, "Camera opened with image analysis (preview=${sp != null})")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to open camera with analysis", e)
+    private fun checkAndCloseCameraIfNoSurfaces() {
+        if (!hasAnySurface()) {
+            Log.d(TAG, "No surfaces available, closing camera")
+            closeCamera()
         }
     }
 
@@ -766,7 +1160,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
     // ===== Notification =====
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.camera_notification_channel_name),

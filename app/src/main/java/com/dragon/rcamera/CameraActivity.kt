@@ -9,12 +9,13 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.IBinder
+import android.view.Surface
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.view.PreviewView
+import androidx.camera.core.Preview
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
@@ -35,8 +38,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,6 +75,7 @@ class CameraActivity : ComponentActivity() {
     private var cameraService: RemoteCameraService? = null
     private var isBound = false
     private var hasPermission = false
+    private var preview: Preview? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -125,14 +127,28 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun showCameraPreview() {
+        // Create Preview instance and set surface provider from service
+        preview = Preview.Builder().build().also { p ->
+            cameraService?.getSurfaceProvider()?.let { provider ->
+                p.setSurfaceProvider(provider)
+            }
+            // Bind the Preview use case to camera through the service
+            cameraService?.bindPreviewUseCase(p)
+        }
+
         setContent {
             RCameraTheme {
                 CameraPreviewScreen(
                     cameraService = cameraService,
-                    onSurfaceProviderReady = { previewView ->
-                        cameraService?.setSurfaceProvider(previewView.surfaceProvider)
+                    onPreviewSurfaceReady = { surface ->
+                        cameraService?.setPreviewSurface(surface)
+                    },
+                    onPreviewSurfaceDestroyed = {
+                        cameraService?.setPreviewSurface(null)
                     },
                     onSurfaceDestroyed = {
+                        preview?.setSurfaceProvider(null)
+                        preview = null
                         cameraService?.clearSurfaceProvider()
                     }
                 )
@@ -185,7 +201,8 @@ fun WaitingScreen() {
 @Composable
 fun CameraPreviewScreen(
     cameraService: RemoteCameraService?,
-    onSurfaceProviderReady: (PreviewView) -> Unit,
+    onPreviewSurfaceReady: (Surface) -> Unit,
+    onPreviewSurfaceDestroyed: () -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
     val context = LocalContext.current
@@ -227,105 +244,24 @@ fun CameraPreviewScreen(
     if (showSettings) {
         AlertDialog(
             onDismissRequest = { showSettings = false },
-            title = { Text("服务器设置") },
+            title = { Text("设置") },
             text = {
-                Column {
-                    OutlinedTextField(
-                        value = serverPassword,
-                        onValueChange = { serverPassword = it },
-                        label = { Text("连接密码") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = serverPort,
-                        onValueChange = { serverPort = it },
-                        label = { Text("端口号") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.setServerPassword(serverPassword)
-                    val port = serverPort.toIntOrNull() ?: 8888
-                    store.setServerPort(port)
-                    // 重启 WebSocket 服务器
-                    cameraService?.stopWebSocketServer()
-                    cameraService?.startWebSocketServer(port, serverPassword)
-                    showSettings = false
-                }) {
-                    Text("保存并重启")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettings = false }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("相机") },
-                navigationIcon = {
-                    IconButton(onClick = {
-                        (context as? ComponentActivity)?.finish()
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { showSettings = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置")
-                    }
-                }
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            // WebSocket 服务器状态卡片
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isWsRunning)
-                        MaterialTheme.colorScheme.primaryContainer
-                    else
-                        MaterialTheme.colorScheme.errorContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isWsRunning) Icons.Default.Check else Icons.Default.Close,
-                            contentDescription = null,
-                            tint = if (isWsRunning) Color(0xFF4CAF50) else Color(0xFFF44336)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (isWsRunning) "WebSocket 服务器运行中" else "WebSocket 服务器未运行",
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                    }
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                ) {
+                    // 连接信息
                     if (isWsRunning && ipInfo != null) {
                         val info = ipInfo!!
                         val port = serverPort.toIntOrNull() ?: 8888
 
+                        Text(
+                            text = "连接地址",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // IPv6 address row (clickable to select for QR)
+                        // IPv6 address row
                         if (info.ipv6Address != null) {
                             val isSelected = selectedQrAddress == info.ipv6Address ||
                                 (selectedQrAddress == null && info.preferredAddress == info.ipv6Address)
@@ -373,7 +309,7 @@ fun CameraPreviewScreen(
                             }
                         }
 
-                        // IPv4 address row (clickable to select for QR)
+                        // IPv4 address row
                         if (info.ipv4Address != null) {
                             val isSelected = selectedQrAddress == info.ipv4Address ||
                                 (selectedQrAddress == null && info.preferredAddress == info.ipv4Address)
@@ -440,26 +376,20 @@ fun CameraPreviewScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "已连接客户端: $clientCount",
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                        // QR Code
                         Spacer(modifier = Modifier.height(12.dp))
-
-                        // 二维码 - use selected address
                         val qrAddress = selectedQrAddress ?: info.preferredAddress
                         val qrContent = cameraService?.getWsServerUrlForAddress(qrAddress) ?: wsUrl
                         if (qrContent.isNotBlank()) {
                             val qrBitmap = remember(qrContent) {
-                                generateQrBitmap(qrContent, 100)
+                                generateQrBitmap(qrContent, 200)
                             }
                             qrBitmap?.let {
                                 Image(
                                     bitmap = it.asImageBitmap(),
                                     contentDescription = "二维码",
                                     modifier = Modifier
-                                        .size(100.dp)
+                                        .size(160.dp)
                                         .aspectRatio(1f)
                                         .align(Alignment.CenterHorizontally)
                                 )
@@ -470,11 +400,122 @@ fun CameraPreviewScreen(
                                 modifier = Modifier.align(Alignment.CenterHorizontally)
                             )
                         }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+
+                    // 服务器配置
+                    Text(
+                        text = "服务器配置",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = serverPassword,
+                        onValueChange = { serverPassword = it },
+                        label = { Text("连接密码") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = serverPort,
+                        onValueChange = { serverPort = it },
+                        label = { Text("端口号") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.setServerPassword(serverPassword)
+                    val port = serverPort.toIntOrNull() ?: 8888
+                    store.setServerPort(port)
+                    // 重启 WebSocket 服务器
+                    cameraService?.stopWebSocketServer()
+                    cameraService?.startWebSocketServer(port, serverPassword)
+                    showSettings = false
+                }) {
+                    Text("保存并重启")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSettings = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("相机") },
+                navigationIcon = {
+                    IconButton(onClick = {
+                        (context as? ComponentActivity)?.finish()
+                    }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            // 简洁的服务器状态栏
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = if (isWsRunning)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.errorContainer
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isWsRunning) Icons.Default.Check else Icons.Default.Close,
+                        contentDescription = null,
+                        tint = if (isWsRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isWsRunning) "服务器运行中" else "服务器未运行",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (isWsRunning) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "·",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "$clientCount 个客户端已连接",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
 
-            // 相机预览
+            // 相机预览 - TextureView 提供 Surface 给 Service 的 OpenGL 管线渲染
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -483,8 +524,21 @@ fun CameraPreviewScreen(
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
-                        PreviewView(ctx).also { previewView ->
-                            onSurfaceProviderReady(previewView)
+                        android.view.TextureView(ctx).also { textureView ->
+                            textureView.surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(surfaceTexture: android.graphics.SurfaceTexture, width: Int, height: Int) {
+                                    onPreviewSurfaceReady(Surface(surfaceTexture))
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(surfaceTexture: android.graphics.SurfaceTexture, width: Int, height: Int) {}
+
+                                override fun onSurfaceTextureDestroyed(surfaceTexture: android.graphics.SurfaceTexture): Boolean {
+                                    onPreviewSurfaceDestroyed()
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(surfaceTexture: android.graphics.SurfaceTexture) {}
+                            }
                         }
                     },
                     onRelease = {
