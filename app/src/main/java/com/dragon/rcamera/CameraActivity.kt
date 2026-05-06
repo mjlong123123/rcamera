@@ -23,9 +23,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,7 +39,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,6 +63,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.dragon.rcamera.data.CameraStore
 import com.dragon.rcamera.ui.theme.RCameraTheme
@@ -242,13 +245,31 @@ fun CameraPreviewScreen(
 
     // 设置对话框
     if (showSettings) {
-        AlertDialog(
+        Dialog(
             onDismissRequest = { showSettings = false },
-            title = { Text("设置") },
-            text = {
-                Column(
-                    modifier = Modifier.verticalScroll(rememberScrollState())
-                ) {
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false
+            )
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.extraLarge,
+                tonalElevation = 6.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+            ) {
+                Column(modifier = Modifier.padding(24.dp)) {
+                    Text(
+                        text = "设置",
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Column(
+                        modifier = Modifier
+                            .verticalScroll(rememberScrollState())
+                            .imePadding()
+                    ) {
                     // 连接信息
                     if (isWsRunning && ipInfo != null) {
                         val info = ipInfo!!
@@ -427,26 +448,30 @@ fun CameraPreviewScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.setServerPassword(serverPassword)
-                    val port = serverPort.toIntOrNull() ?: 8888
-                    store.setServerPort(port)
-                    // 重启 WebSocket 服务器
-                    cameraService?.stopWebSocketServer()
-                    cameraService?.startWebSocketServer(port, serverPassword)
-                    showSettings = false
-                }) {
-                    Text("保存并重启")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettings = false }) {
-                    Text("取消")
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showSettings = false }) {
+                            Text("取消")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(onClick = {
+                            store.setServerPassword(serverPassword)
+                            val port = serverPort.toIntOrNull() ?: 8888
+                            store.setServerPort(port)
+                            // 重启 WebSocket 服务器
+                            cameraService?.stopWebSocketServer()
+                            cameraService?.startWebSocketServer(port, serverPassword)
+                            showSettings = false
+                        }) {
+                            Text("保存并重启")
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     Scaffold(
