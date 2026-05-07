@@ -48,6 +48,10 @@ class WsServer(
     private val password: String
 ) : WebSocketServer(InetSocketAddress(port)) {
 
+    init {
+        setReuseAddr(true)
+    }
+
     private val secretKey: SecretKey = CryptoUtil.deriveKey(password)
     private val authenticatedConnections = mutableSetOf<WebSocket>()
 

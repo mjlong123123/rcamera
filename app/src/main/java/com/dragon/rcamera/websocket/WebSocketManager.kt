@@ -56,9 +56,15 @@ class WebSocketManager {
 
     fun stopServer() {
         if (mode != WsManagerMode.SERVER) return
+        val s = server ?: return
         try {
-            server?.stop()
-        } catch (_: Exception) {}
+            s.stop(2000)
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "Server stop interrupted, old thread may still be holding the port", e)
+            Thread.currentThread().interrupt()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping server", e)
+        }
         server = null
         mode = WsManagerMode.NONE
         onServerStateChanged?.invoke(false)

@@ -46,6 +46,7 @@ import org.java_websocket.WebSocket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -62,7 +63,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     private val lifecycleRegistry = LifecycleRegistry(this)
-    private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private lateinit var cameraExecutor: ExecutorService
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var preview: Preview? = null
@@ -74,6 +75,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private val binder = LocalBinder()
     private val wsManager = WebSocketManager()
     private var isCameraOpen = false
+
+    // WebSocket configuration
+    private var wsPort: Int = -1
+    private var wsPassword: String? = null
 
     // RTP and encoding
     private val rtpSender = RtpSender()
@@ -134,7 +139,14 @@ class RemoteCameraService : Service(), LifecycleOwner {
         startForeground(NOTIFICATION_ID, buildNotification())
 
         acquireWakeLock()
+        cameraExecutor = Executors.newSingleThreadExecutor()
         initCamera()
+
+        // Initialize and start WebSocket server based on stored configuration
+        val store = CameraStore(this)
+        wsPort = store.getServerPort()
+        wsPassword = store.getServerPassword()
+        startWebSocketIfConfigured()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -143,21 +155,30 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Service onStartCommand: action=${intent?.action}, startId=$startId")
+        Log.d(TAG, "Service onStartCommand: startId=$startId")
+
+        // Update WebSocket configuration if provided
         intent?.let {
-            when (it.action) {
-                ACTION_START_WS -> {
-                    val store = CameraStore(this)
-                    val port = it.getIntExtra(EXTRA_PORT, store.getServerPort())
-                    val password = it.getStringExtra(EXTRA_PASSWORD) ?: store.getServerPassword()
-                    startWebSocketServer(port, password)
-                }
-                ACTION_STOP_WS -> {
-                    stopWebSocketServer()
-                }
+            val newPort = it.getIntExtra(EXTRA_PORT, -1)
+            val newPassword = it.getStringExtra(EXTRA_PASSWORD)
+
+            var configChanged = false
+            if (newPort > 0 && newPort != wsPort) {
+                wsPort = newPort
+                configChanged = true
+            }
+            if (newPassword != null && newPassword != wsPassword) {
+                wsPassword = newPassword
+                configChanged = true
+            }
+
+            // Restart WebSocket if configuration changed
+            if (configChanged) {
+                startWebSocketIfConfigured()
             }
         }
-        return START_NOT_STICKY
+
+        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -339,6 +360,25 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     // ===== WebSocket Server =====
+
+    /**
+     * Start WebSocket server if port and password are configured.
+     * If server is already running, it will be restarted with new configuration.
+     */
+    private fun startWebSocketIfConfigured() {
+        if (wsPort <= 0 || wsPassword.isNullOrEmpty()) {
+            Log.d(TAG, "WebSocket not configured, skipping start (port=$wsPort, password=${if (wsPassword.isNullOrEmpty()) "null" else "***"})")
+            return
+        }
+
+        // Stop existing server if running
+        if (wsManager.isServerRunning()) {
+            Log.d(TAG, "Stopping existing WebSocket server before restart")
+            wsManager.stopServer()
+        }
+
+        startWebSocketServer(wsPort, wsPassword!!)
+    }
 
     fun startWebSocketServer(port: Int, password: String) {
         Log.d(TAG, "WS server starting: port=$port")
