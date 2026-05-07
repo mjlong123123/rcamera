@@ -510,6 +510,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     stopEncodingAndRtp()
                 }
             }
+            WsMessage.ACTION_REQUEST_KEYFRAME -> {
+                Log.d(TAG, "Keyframe requested by client $clientId")
+                requestKeyFrameFromEncoder()
+            }
         }
     }
 
@@ -1018,6 +1022,18 @@ class RemoteCameraService : Service(), LifecycleOwner {
         } catch (e: Exception) {
             Log.e(TAG, "MediaCodec failed to create encoder", e)
             releaseEncoderSurface()
+        }
+    }
+
+    private fun requestKeyFrameFromEncoder() {
+        try {
+            val enc = encoder ?: return
+            val params = android.os.Bundle()
+            params.putInt(android.media.MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            enc.setParameters(params)
+            Log.d(TAG, "Sync frame requested from encoder")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request sync frame", e)
         }
     }
 

@@ -7,12 +7,17 @@ import android.view.SurfaceView
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -169,6 +174,10 @@ fun CameraViewerScreen(
         rtpReceiver.onFrameReceived = { frameData ->
             h264Decoder.feedFrame(frameData)
         }
+        rtpReceiver.onKeyFrameRequested = {
+            Log.d("CameraViewer", "Requesting keyframe from server")
+            wsManager.sendCommand(WsMessage.ACTION_REQUEST_KEYFRAME, com.google.gson.JsonObject())
+        }
         rtpReceiver.start(0) // Use any available port
     }
 
@@ -184,18 +193,53 @@ fun CameraViewerScreen(
             )
         }
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .clipToBounds()
         ) {
-            // Status bar
+            // Video: fill height, maintain 9:16 ratio — overflow horizontally for crop-center
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .aspectRatio(9f / 16f)
+                    .align(Alignment.Center),
+                factory = { ctx ->
+                    SurfaceView(ctx).also { surfaceView ->
+                        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                holder.setFixedSize(720, 1280)
+                                h264Decoder.start(holder.surface)
+                                isSurfaceReady = true
+                                wsManager.connectAsClient(wsUrl, password)
+                            }
+
+                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                h264Decoder.stop()
+                                isSurfaceReady = false
+                            }
+                        })
+                    }
+                }
+            )
+
+            // Status overlay — semi-transparent, does not affect video layout
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(8.dp)
             ) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .background(
+                            Color.Black.copy(alpha = 0.45f),
+                            RoundedCornerShape(6.dp)
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
                     Text(
                         text = when (connectionState) {
                             WsClientState.CONNECTED -> if (isReceiving) "接收视频中..." else "已连接，等待视频流..."
@@ -206,54 +250,17 @@ fun CameraViewerScreen(
                             WsClientState.ERROR -> "连接错误"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = when (connectionState) {
-                            WsClientState.CONNECTED -> MaterialTheme.colorScheme.primary
-                            WsClientState.CONNECTING, WsClientState.AUTHENTICATING -> MaterialTheme.colorScheme.tertiary
-                            else -> MaterialTheme.colorScheme.error
-                        }
+                        color = Color.White
                     )
                     if (debugInfo.isNotBlank()) {
                         Text(
                             text = debugInfo,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = Color.White.copy(alpha = 0.8f),
                             fontFamily = FontFamily.Monospace
                         )
                     }
                 }
-            }
-
-            // Video surface
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                AndroidView(
-                    modifier = Modifier
-                        .aspectRatio(9f / 16f)
-                        .fillMaxSize(),
-                    factory = { ctx ->
-                        SurfaceView(ctx).also { surfaceView ->
-                            surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) {
-                                    holder.setFixedSize(720, 1280)
-                                    h264Decoder.start(holder.surface)
-                                    isSurfaceReady = true
-                                    wsManager.connectAsClient(wsUrl, password)
-                                }
-
-                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-
-                                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                                    h264Decoder.stop()
-                                    isSurfaceReady = false
-                                }
-                            })
-                        }
-                    }
-                )
             }
         }
     }
