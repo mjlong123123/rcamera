@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -1272,16 +1273,30 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     private fun buildNotification(): Notification {
-        val wsInfo = if (wsManager.isServerRunning()) {
-            " | WS: ${wsManager.getServerUrl()} (${wsManager.getServerClientCount()}客户端)"
-        } else ""
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.camera_notification_title) + wsInfo)
+        val clientCount = wsManager.getServerClientCount()
+        val statusText = if (wsManager.isServerRunning()) {
+            if (clientCount > 0) {
+                "已连接 $clientCount 个客户端"
+            } else {
+                "等待客户端连接"
+            }
+        } else {
+            "服务器未运行"
+        }
+
+        val intent = Intent(this, CameraActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.camera_notification_title))
+            .setContentText(statusText)
             .setSmallIcon(R.drawable.ic_camera_notification)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
-        Log.d(TAG, "Notification built: title=${getString(R.string.camera_notification_title)}$wsInfo")
-        return notification
     }
 
     private fun updateNotification() {

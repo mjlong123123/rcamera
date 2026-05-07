@@ -10,22 +10,27 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -115,12 +120,38 @@ fun CameraViewerScreen(
     var isReceiving by remember { mutableStateOf(false) }
     var isSurfaceReady by remember { mutableStateOf(false) }
     var debugInfo by remember { mutableStateOf("") }
+    var videoWidth by remember { mutableStateOf(0) }
+    var videoHeight by remember { mutableStateOf(0) }
+    var networkSpeed by remember { mutableStateOf("") }
+    var hasBeenConnected by remember { mutableStateOf(false) }
+    var showAuthFailedDialog by remember { mutableStateOf(false) }
+    var retryPassword by remember { mutableStateOf(password) }
+    var showErrorDialog by remember { mutableStateOf(false) }
 
-    // Update debug info periodically
+    // Update debug info periodically + calculate network speed
     LaunchedEffect(rtpReceiver, h264Decoder) {
+        var lastBytes = 0L
         while (true) {
             kotlinx.coroutines.delay(1000)
-            debugInfo = "RTP: ${rtpReceiver.getStats()} | Dec: ${h264Decoder.getStats()}"
+            val currentBytes = rtpReceiver.getReceivedBytes()
+            val bytesPerSec = currentBytes - lastBytes
+            lastBytes = currentBytes
+            val kbps = bytesPerSec * 8 / 1000
+            networkSpeed = if (kbps > 1000) {
+                "%.1f Mbps".format(kbps / 1000.0)
+            } else {
+                "$kbps Kbps"
+            }
+            val resInfo = if (videoWidth > 0) "${videoWidth}x${videoHeight}" else "?x?"
+            debugInfo = "$resInfo | $networkSpeed | RTP: ${rtpReceiver.getStats()} | Dec: ${h264Decoder.getStats()}"
+        }
+    }
+
+    // Auto-exit when server disconnects after successful connection
+    LaunchedEffect(connectionState, hasBeenConnected) {
+        if (connectionState == WsClientState.DISCONNECTED && hasBeenConnected) {
+            kotlinx.coroutines.delay(800)
+            onBack()
         }
     }
 
@@ -129,6 +160,7 @@ fun CameraViewerScreen(
         wsManager.onClientStateChanged = { state ->
             connectionState = state
             if (state == WsClientState.CONNECTED) {
+                hasBeenConnected = true
                 // Connected and authenticated, request RTP start
                 val localRtpPort = rtpReceiver.getLocalPort()
                 Log.d("CameraViewer", "WebSocket connected, local RTP port=$localRtpPort")
@@ -144,6 +176,12 @@ fun CameraViewerScreen(
             if (state == WsClientState.DISCONNECTED || state == WsClientState.ERROR || state == WsClientState.AUTH_FAILED) {
                 isReceiving = false
             }
+            if (state == WsClientState.AUTH_FAILED) {
+                showAuthFailedDialog = true
+            }
+            if (state == WsClientState.ERROR) {
+                showErrorDialog = true
+            }
         }
 
         wsManager.onClientMessageReceived = { message ->
@@ -155,6 +193,8 @@ fun CameraViewerScreen(
                     val serverRtpPort = message.payload.get("server_rtp_port")?.asInt ?: 0
                     val w = message.payload.get("video_width")?.asInt ?: 0
                     val h = message.payload.get("video_height")?.asInt ?: 0
+                    videoWidth = w
+                    videoHeight = h
                     Log.d("CameraViewer", "RTP stream started, server_rtp_port=$serverRtpPort, video=${w}x${h}")
                 } else {
                     Log.e("CameraViewer", "RTP start failed: ${message.payload}")
@@ -261,6 +301,71 @@ fun CameraViewerScreen(
                         )
                     }
                 }
+            }
+
+            // AUTH_FAILED dialog — password input for retry
+            if (showAuthFailedDialog) {
+                AlertDialog(
+                    onDismissRequest = { showAuthFailedDialog = false },
+                    title = { Text("认证失败") },
+                    text = {
+                        Column {
+                            Text("密码错误，请重新输入密码")
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = retryPassword,
+                                onValueChange = { retryPassword = it },
+                                label = { Text("连接密码") },
+                                singleLine = true
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showAuthFailedDialog = false
+                            hasBeenConnected = false
+                            wsManager.stop()
+                            wsManager.connectAsClient(wsUrl, retryPassword)
+                        }) {
+                            Text("重试")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showAuthFailedDialog = false
+                            onBack()
+                        }) {
+                            Text("返回")
+                        }
+                    }
+                )
+            }
+
+            // ERROR dialog — connection failure with retry
+            if (showErrorDialog) {
+                AlertDialog(
+                    onDismissRequest = { showErrorDialog = false },
+                    title = { Text("连接失败") },
+                    text = { Text("无法连接到服务器，请检查网络连接或服务器地址") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showErrorDialog = false
+                            hasBeenConnected = false
+                            wsManager.stop()
+                            wsManager.connectAsClient(wsUrl, password)
+                        }) {
+                            Text("重试")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showErrorDialog = false
+                            onBack()
+                        }) {
+                            Text("返回")
+                        }
+                    }
+                )
             }
         }
     }

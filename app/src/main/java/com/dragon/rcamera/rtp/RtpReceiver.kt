@@ -61,12 +61,16 @@ class RtpReceiver {
 
     // Stats for debugging
     @Volatile private var receivedPacketCount = 0
+    @Volatile private var receivedBytes = 0L
     @Volatile private var deliveredFrameCount = 0
     @Volatile private var lastFrameSize = 0
     @Volatile private var lostPacketCount = 0
     @Volatile private var discardedFrameCount = 0
 
     fun getStats(): String = "pkts=$receivedPacketCount frames=$deliveredFrameCount lost=$lostPacketCount discarded=$discardedFrameCount buf=${packetBuffer.size} lastSize=$lastFrameSize"
+
+    /** Total bytes received (RTP payload + header) for bandwidth calculation. */
+    fun getReceivedBytes(): Long = receivedBytes
 
     fun start(localPort: Int) {
         if (isRunning) return
@@ -157,6 +161,7 @@ class RtpReceiver {
                 if (length < RtpPacket.HEADER_SIZE) continue
 
                 receivedPacketCount++
+                receivedBytes += length
                 if (receivedPacketCount == 1) {
                     Log.d(TAG, "First RTP packet received! From ${packet.address}:${packet.port}, length=$length")
                 }
