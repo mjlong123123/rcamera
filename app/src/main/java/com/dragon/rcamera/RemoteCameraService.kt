@@ -126,9 +126,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "Service onCreate")
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
 
         createNotificationChannel()
+        Log.d(TAG, "Service show notification (id=$NOTIFICATION_ID)")
         startForeground(NOTIFICATION_ID, buildNotification())
 
         acquireWakeLock()
@@ -136,10 +138,12 @@ class RemoteCameraService : Service(), LifecycleOwner {
     }
 
     override fun onBind(intent: Intent?): IBinder {
+        Log.d(TAG, "Service onBind")
         return binder
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "Service onStartCommand: action=${intent?.action}, startId=$startId")
         intent?.let {
             when (it.action) {
                 ACTION_START_WS -> {
@@ -153,10 +157,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 }
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "Service onDestroy")
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         stopWebSocketServer()
         stopEncodingAndRtp()
@@ -169,6 +174,12 @@ class RemoteCameraService : Service(), LifecycleOwner {
         cameraProvider = null
         cameraExecutor.shutdown()
         releaseWakeLock()
+        Log.d(TAG, "Service remove notification (id=$NOTIFICATION_ID)")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        // Explicitly cancel the notification in case stopForeground doesn't remove it
+        // (e.g., due to async callbacks re-posting it after stopForeground)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.cancel(NOTIFICATION_ID)
         super.onDestroy()
     }
 
@@ -330,7 +341,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
     // ===== WebSocket Server =====
 
     fun startWebSocketServer(port: Int, password: String) {
+        Log.d(TAG, "WS server starting: port=$port")
         wsManager.onServerMessageReceived = { conn, message ->
+            Log.d(TAG, "WS recv from ${conn.remoteSocketAddress}: $message")
             handleClientMessage(conn, message)
         }
         wsManager.onServerClientConnected = { conn ->
@@ -341,13 +354,16 @@ class RemoteCameraService : Service(), LifecycleOwner {
             handleClientDisconnected(conn)
             updateNotification()
         }
-        wsManager.startServer(port, password)
+        val result = wsManager.startServer(port, password)
+        Log.d(TAG, "WS server started: result=$result")
         updateNotification()
     }
 
     fun stopWebSocketServer() {
+        Log.d(TAG, "WS server stopping")
         stopEncodingAndRtp()
         wsManager.stopServer()
+        Log.d(TAG, "WS server stopped")
         updateNotification()
     }
 
@@ -394,12 +410,14 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 openCamera()
                 val response = message.makeResponse(true, mapOf("camera_open" to true))
                 wsManager.sendToClient(conn, response)
+                Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
                 broadcastCameraStatus()
             }
             WsMessage.ACTION_CLOSE_CAMERA -> {
                 closeCamera()
                 val response = message.makeResponse(true, mapOf("camera_open" to false))
                 wsManager.sendToClient(conn, response)
+                Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
                 broadcastCameraStatus()
             }
             WsMessage.ACTION_PING -> {
@@ -410,6 +428,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     payload = JsonObject().apply { addProperty("camera_open", isCameraOpen) }
                 )
                 wsManager.sendToClient(conn, response)
+                Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
             }
             WsMessage.ACTION_START_RTP -> {
                 val rtpPort = message.payload.get("rtp_port")?.asInt ?: return
@@ -431,6 +450,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     "video_height" to encodedHeight
                 ))
                 wsManager.sendToClient(conn, response)
+                Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
 
                 if (!isEncoding) {
                     startEncodingAndRtp()
@@ -442,6 +462,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
                 val response = message.makeResponse(true, mapOf("rtp_stopped" to true))
                 wsManager.sendToClient(conn, response)
+                Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
 
                 if (!rtpSender.hasDestinations()) {
                     stopEncodingAndRtp()
@@ -457,6 +478,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             payload = JsonObject().apply { addProperty("camera_open", isCameraOpen) }
         )
         wsManager.broadcastToClients(msg)
+        Log.d(TAG, "WS broadcast: $msg")
     }
 
     // ===== OpenGL =====
@@ -815,8 +837,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
         override fun run() {
             isRunning = true
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_VIDEO)
-
-            Log.d(TAG, "Render thread started")
+            Log.d(TAG, "RenderThread started")
 
             while (isRunning) {
                 try {
@@ -837,7 +858,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     // Make EGL context current before updateTexImage
                     // (SurfaceTexture.updateTexImage requires the EGL context that created the texture to be current)
                     if (!makeCurrent(eglPBufferSurface)) {
-                        Log.e(TAG, "Failed to make EGL context current for updateTexImage")
+                        Log.e(TAG, "RenderThread: failed to make EGL context current for updateTexImage")
                         continue
                     }
 
@@ -856,12 +877,12 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     }
                 } catch (e: Exception) {
                     if (isRunning) {
-                        Log.e(TAG, "Render loop error", e)
+                        Log.e(TAG, "RenderThread loop error", e)
                     }
                 }
             }
 
-            Log.d(TAG, "Render thread stopped")
+            Log.d(TAG, "RenderThread stopped")
             isRunning = false
         }
 
@@ -908,6 +929,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
      * Create encoder surface for MediaCodec input.
      */
     private fun createEncoderSurface() {
+        Log.d(TAG, "MediaCodec creating encoder: ${encoderWidth}x${encoderHeight}")
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC, encoderWidth, encoderHeight
         )
@@ -921,9 +943,12 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
         try {
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            Log.d(TAG, "MediaCodec configure: $format")
             encoder?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoderSurface = encoder?.createInputSurface()
+            Log.d(TAG, "MediaCodec input surface created")
             encoder?.start()
+            Log.d(TAG, "MediaCodec started")
 
             // Set encoder surface for OpenGL rendering
             encoderSurface?.let { surface ->
@@ -936,23 +961,26 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 start()
             }
 
-            Log.d(TAG, "H264 encoder started with surface input: ${encoderWidth}x${encoderHeight}")
+            Log.d(TAG, "MediaCodec encoder ready: ${encoderWidth}x${encoderHeight}")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create encoder surface", e)
+            Log.e(TAG, "MediaCodec failed to create encoder", e)
             releaseEncoderSurface()
         }
     }
 
     private fun stopH264Encoder() {
+        Log.d(TAG, "MediaCodec stopping encoder")
         try {
             drainThread?.join(1000)
         } catch (_: Exception) {}
         drainThread = null
         try {
             encoder?.stop()
+            Log.d(TAG, "MediaCodec stopped")
             encoder?.release()
+            Log.d(TAG, "MediaCodec released")
         } catch (e: Exception) {
-            Log.w(TAG, "Error stopping encoder", e)
+            Log.w(TAG, "MediaCodec error stopping", e)
         }
         encoder = null
     }
@@ -960,6 +988,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private var drainThread: Thread? = null
 
     private fun drainEncoderLoop() {
+        Log.d(TAG, "MediaCodec drain loop started")
         val info = MediaCodec.BufferInfo()
         while (isEncoding) {
             try {
@@ -974,19 +1003,20 @@ class RemoteCameraService : Service(), LifecycleOwner {
                         outputBuffer.get(data)
                         rtpSender.sendH264AccessUnit(data, data.size, info.presentationTimeUs, isConfig = isConfig)
                         if (isConfig) {
-                            Log.d(TAG, "Encoder output SPS/PPS config: ${info.size} bytes")
+                            Log.d(TAG, "MediaCodec output SPS/PPS config: ${info.size} bytes, pts=${info.presentationTimeUs}")
                         }
                     }
                     enc.releaseOutputBuffer(outputBufferIndex, false)
                 } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    Log.d(TAG, "Encoder output format changed: ${enc.outputFormat}")
+                    Log.d(TAG, "MediaCodec output format changed: ${enc.outputFormat}")
                 }
             } catch (e: Exception) {
                 if (isEncoding) {
-                    Log.e(TAG, "Encoder drain error", e)
+                    Log.e(TAG, "MediaCodec drain error", e)
                 }
             }
         }
+        Log.d(TAG, "MediaCodec drain loop ended")
     }
 
     /**
@@ -1168,6 +1198,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             )
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
+            Log.d(TAG, "Notification channel created: $CHANNEL_ID")
         }
     }
 
@@ -1175,14 +1206,21 @@ class RemoteCameraService : Service(), LifecycleOwner {
         val wsInfo = if (wsManager.isServerRunning()) {
             " | WS: ${wsManager.getServerUrl()} (${wsManager.getServerClientCount()}客户端)"
         } else ""
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.camera_notification_title) + wsInfo)
             .setSmallIcon(R.drawable.ic_camera_notification)
             .setOngoing(true)
             .build()
+        Log.d(TAG, "Notification built: title=${getString(R.string.camera_notification_title)}$wsInfo")
+        return notification
     }
 
     private fun updateNotification() {
+        if (lifecycleRegistry.currentState == Lifecycle.State.DESTROYED) {
+            Log.d(TAG, "Notification update skipped: service is destroyed")
+            return
+        }
+        Log.d(TAG, "Notification show/update (id=$NOTIFICATION_ID)")
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification())
     }

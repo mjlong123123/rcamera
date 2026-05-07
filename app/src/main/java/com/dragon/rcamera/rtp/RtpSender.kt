@@ -36,26 +36,28 @@ class RtpSender {
     private val packetCount = AtomicInteger(0)
 
     fun start() {
+        Log.d(TAG, "RtpSender starting")
         try {
             // Bind to IPv6 wildcard "::" for dual-stack (IPv4+IPv6) support.
             // On Android, a socket bound to "::" accepts both IPv4 and IPv6 traffic.
             socket = DatagramSocket(null)
             socket?.reuseAddress = true
             socket?.bind(InetSocketAddress("::", 0))
-            Log.d(TAG, "RTP sender started on port ${socket?.localPort}, bound to :: (dual-stack)")
+            Log.d(TAG, "RtpSender started on port ${socket?.localPort}, bound to :: (dual-stack)")
         } catch (e: SocketException) {
-            Log.e(TAG, "Failed to start RTP sender on ::, falling back", e)
+            Log.e(TAG, "RtpSender failed to start on ::, falling back", e)
             // Fallback to default (IPv4 only) if IPv6 binding fails
             try {
                 socket = DatagramSocket()
-                Log.d(TAG, "RTP sender started on port ${socket?.localPort}, bound to 0.0.0.0 (IPv4 only)")
+                Log.d(TAG, "RtpSender started on port ${socket?.localPort}, bound to 0.0.0.0 (IPv4 only)")
             } catch (e2: SocketException) {
-                Log.e(TAG, "Failed to start RTP sender", e2)
+                Log.e(TAG, "RtpSender failed to start", e2)
             }
         }
     }
 
     fun stop() {
+        Log.d(TAG, "RtpSender stopping")
         try {
             socket?.close()
         } catch (_: Exception) {}
@@ -63,7 +65,7 @@ class RtpSender {
         destinations.clear()
         cachedConfigData = null
         packetCount.set(0)
-        Log.d(TAG, "RTP sender stopped")
+        Log.d(TAG, "RtpSender stopped")
     }
 
     fun addDestination(clientId: String, host: String, rtpPort: Int) {
@@ -125,7 +127,7 @@ class RtpSender {
             cachedConfigData = data.copyOf(length)
             cachedConfigPresentationTimeUs = presentationTimeUs
             if (destinations.isEmpty()) {
-                Log.d(TAG, "Cached SPS/PPS config data (${length} bytes) for future clients")
+                Log.d(TAG, "RtpSender cached SPS/PPS (${length} bytes), no destinations")
                 return
             }
         }
@@ -143,7 +145,7 @@ class RtpSender {
         val allNalus: List<ByteArray> = if (isIdr && !isConfig) {
             val configNalus = cachedConfigData?.let { splitNalus(it, it.size) } ?: emptyList()
             if (configNalus.isNotEmpty()) {
-                Log.d(TAG, "Prepending ${configNalus.size} SPS/PPS NALUs before IDR frame")
+                Log.d(TAG, "RtpSender prepending ${configNalus.size} SPS/PPS NALUs before IDR frame")
             }
             configNalus + nalus
         } else {
@@ -157,7 +159,7 @@ class RtpSender {
 
         val count = packetCount.incrementAndGet()
         if (count % 300 == 0) {
-            Log.d(TAG, "RTP sent $count access units, destinations=${destinations.size}")
+            Log.d(TAG, "RtpSender sent $count access units, destinations=${destinations.size}")
         }
     }
 

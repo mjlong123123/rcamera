@@ -180,11 +180,6 @@ class CameraActivity : ComponentActivity() {
             unbindService(connection)
             isBound = false
         }
-        // 停止 WebSocket 服务器
-        val wsIntent = Intent(this, RemoteCameraService::class.java).apply {
-            action = RemoteCameraService.ACTION_STOP_WS
-        }
-        startService(wsIntent)
         stopService(Intent(this, RemoteCameraService::class.java))
         super.onDestroy()
     }
