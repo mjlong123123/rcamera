@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -226,17 +227,20 @@ fun CameraViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1f),
+                contentAlignment = Alignment.Center
             ) {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .aspectRatio(9f / 16f)
+                        .fillMaxSize(),
                     factory = { ctx ->
                         SurfaceView(ctx).also { surfaceView ->
                             surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                                 override fun surfaceCreated(holder: SurfaceHolder) {
+                                    holder.setFixedSize(720, 1280)
                                     h264Decoder.start(holder.surface)
                                     isSurfaceReady = true
-                                    // Now connect WebSocket to start the auth + RTP flow
                                     wsManager.connectAsClient(wsUrl, password)
                                 }
 

@@ -16,6 +16,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionFilter
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -130,14 +133,30 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun showCameraPreview() {
-        // Create Preview instance and set surface provider from service
-        preview = Preview.Builder().build().also { p ->
-            cameraService?.getSurfaceProvider()?.let { provider ->
-                p.setSurfaceProvider(provider)
+        // Create Preview with resolution matching encoder (720x1280, 9:16 portrait)
+        preview = Preview.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    .setResolutionFilter(ResolutionFilter { supportedSizes, _ ->
+                        val maxMegaPixels = 1920 * 1080
+                        val targetPixels = 1280 * 720
+                        val candidates = supportedSizes.filter {
+                            it.width * it.height <= maxMegaPixels
+                        }
+                        val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
+                        source.sortedBy {
+                            Math.abs(it.width * it.height - targetPixels)
+                        }.toMutableList()
+                    })
+                    .build()
+            )
+            .build().also { p ->
+                cameraService?.getSurfaceProvider()?.let { provider ->
+                    p.setSurfaceProvider(provider)
+                }
+                cameraService?.bindPreviewUseCase(p)
             }
-            // Bind the Preview use case to camera through the service
-            cameraService?.bindPreviewUseCase(p)
-        }
 
         setContent {
             RCameraTheme {
@@ -539,10 +558,13 @@ fun CameraPreviewScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1f),
+                contentAlignment = Alignment.Center
             ) {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .aspectRatio(9f / 16f)
+                        .fillMaxSize(),
                     factory = { ctx ->
                         android.view.TextureView(ctx).also { textureView ->
                             textureView.surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {

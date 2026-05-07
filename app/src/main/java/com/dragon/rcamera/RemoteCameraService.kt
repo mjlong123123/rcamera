@@ -106,6 +106,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private var positionHandle: Int = 0
     private var texCoordHandle: Int = 0
     private var textureHandle: Int = 0
+    private var transformMatrixHandle: Int = 0
     private var vertexBuffer: FloatBuffer? = null
     private var texCoordBuffer: FloatBuffer? = null
 
@@ -113,8 +114,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
         -1f, -1f,  1f, -1f, -1f,  1f,  1f,  1f
     )
     private val texCoords = floatArrayOf(
-        1f, 1f,  1f, 0f,  0f, 1f,  0f, 0f
+        0f, 0f,  1f, 0f,  0f, 1f,  1f, 1f
     )
+    private val transformMatrix = FloatArray(16)
 
     private var renderThread: RenderThread? = null
     private val isFrameAvailable = AtomicBoolean(false)
@@ -618,6 +620,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
             .put(texCoords)
             texCoordBuffer?.position(0)
 
+            // Initialize transform matrix as identity
+            android.opengl.Matrix.setIdentityM(transformMatrix, 0)
+
             // Create OES texture for camera
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
@@ -656,10 +661,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
         GLES20.glShaderSource(vertexShader, """
             attribute vec4 aPosition;
             attribute vec2 aTexCoord;
+            uniform mat4 uTransformMatrix;
             varying vec2 vTexCoord;
             void main() {
                 gl_Position = aPosition;
-                vTexCoord = aTexCoord;
+                vTexCoord = (uTransformMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
             }
         """.trimIndent())
         GLES20.glCompileShader(vertexShader)
@@ -687,6 +693,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
         positionHandle = GLES20.glGetAttribLocation(shaderProgram, "aPosition")
         texCoordHandle = GLES20.glGetAttribLocation(shaderProgram, "aTexCoord")
         textureHandle = GLES20.glGetUniformLocation(shaderProgram, "uTexture")
+        transformMatrixHandle = GLES20.glGetUniformLocation(shaderProgram, "uTransformMatrix")
 
         return true
     }
@@ -840,6 +847,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
         GLES20.glUseProgram(shaderProgram)
 
+        // Set the transform matrix from SurfaceTexture for correct orientation
+        GLES20.glUniformMatrix4fv(transformMatrixHandle, 1, false, transformMatrix, 0)
+
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraOesTextureId)
         GLES20.glUniform1i(textureHandle, 0)
@@ -904,6 +914,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
                     // Update texture from SurfaceTexture
                     cameraSurfaceTexture?.updateTexImage()
+
+                    // Get the transform matrix for correct orientation
+                    cameraSurfaceTexture?.getTransformMatrix(transformMatrix)
 
                     // Get the texture timestamp for debugging
                     val timestamp = cameraSurfaceTexture?.timestamp ?: 0L
