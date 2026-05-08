@@ -1355,7 +1355,9 @@ class RemoteCameraService : Service(), LifecycleOwner {
             "服务器未运行"
         }
 
-        val intent = Intent(this, CameraActivity::class.java)
+        val intent = Intent(this, CameraActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

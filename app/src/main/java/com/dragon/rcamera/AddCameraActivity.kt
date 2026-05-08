@@ -1,7 +1,9 @@
 package com.dragon.rcamera
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -36,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,14 +61,26 @@ class AddCameraActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Read pre-filled data from extras
+        val prefillWsUrl = intent?.getStringExtra(EXTRA_WS_URL)
+        val prefillPassword = intent?.getStringExtra(EXTRA_PASSWORD) ?: ""
+
         setContent {
             RCameraTheme {
                 AddCameraScreen(
                     onBack = { finish() },
-                    onSaved = { finish() }
+                    onSaved = { finish() },
+                    prefillWsUrl = prefillWsUrl,
+                    prefillPassword = prefillPassword
                 )
             }
         }
+    }
+
+    companion object {
+        const val EXTRA_WS_URL = "extra_ws_url"
+        const val EXTRA_PASSWORD = "extra_password"
     }
 }
 
@@ -73,15 +88,24 @@ class AddCameraActivity : ComponentActivity() {
 @Composable
 fun AddCameraScreen(
     onBack: () -> Unit,
-    onSaved: () -> Unit
+    onSaved: () -> Unit,
+    prefillWsUrl: String? = null,
+    prefillPassword: String? = null
 ) {
     val context = LocalContext.current
     val cameraStore = remember { CameraStore(context) }
     var name by remember { mutableStateOf("") }
-    var wsUrl by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var wsUrl by remember { mutableStateOf(prefillWsUrl ?: "") }
+    var password by remember { mutableStateOf(prefillPassword ?: "") }
     var isScanning by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
+
+    // Auto-derive name from wsUrl if not set
+    LaunchedEffect(wsUrl) {
+        if (name.isBlank() && wsUrl.isNotBlank()) {
+            name = "远程摄像头"
+        }
+    }
 
     // 权限请求
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -107,18 +131,25 @@ fun AddCameraScreen(
 
     fun parseQrContent(content: String): Triple<String, String, String>? {
         // 支持格式:
-        // 1. rcamera://ws://IP:PORT?name=MyCamera
-        // 2. ws://IP:PORT
-        // 3. ws://IP:PORT?name=MyCamera
+        // 1. rcamera://add?wsUrl=ws://[IPv6]:PORT&port=PORT&password=xxx
+        // 2. rcamera://ws://IP:PORT?name=MyCamera
+        // 3. ws://IP:PORT
+        // 4. ws://IP:PORT?name=MyCamera
         return try {
-            if (content.startsWith("rcamera://")) {
+            if (content.startsWith("rcamera://add?") || content.startsWith("rcamera://add/")) {
+                val uri = Uri.parse(content)
+                val wsUrlParam = uri.getQueryParameter("wsUrl") ?: return null
+                val nameParam = uri.getQueryParameter("name") ?: "远程摄像头"
+                val passwordParam = uri.getQueryParameter("password") ?: ""
+                Triple(nameParam, wsUrlParam, passwordParam)
+            } else if (content.startsWith("rcamera://")) {
                 val rest = content.removePrefix("rcamera://")
-                val uri = android.net.Uri.parse(rest)
+                val uri = Uri.parse(rest)
                 val url = rest.substringBefore("?")
                 val n = uri.getQueryParameter("name") ?: "远程摄像头"
                 Triple(n, url, "")
             } else if (content.startsWith("ws://") || content.startsWith("wss://")) {
-                val uri = android.net.Uri.parse(content)
+                val uri = Uri.parse(content)
                 val url = content.substringBefore("?")
                 val n = uri.getQueryParameter("name") ?: "远程摄像头"
                 Triple(n, url, "")

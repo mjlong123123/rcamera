@@ -50,6 +50,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Handle deep link: rcamera://add?wsUrl=...&port=...&password=...
+        handleDeepLink(intent)
+
         setContent {
             RCameraTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -57,6 +61,30 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    private fun handleDeepLink(intent: Intent?) {
+        val data = intent?.data
+        if (intent?.action == Intent.ACTION_VIEW && data != null && data.host == "add") {
+            val wsUrl = data.getQueryParameter("wsUrl")
+            val password = data.getQueryParameter("password") ?: ""
+            if (wsUrl != null) {
+                // Launch CameraListActivity, then AddCameraActivity to build back stack
+                val listIntent = Intent(this, CameraListActivity::class.java)
+                val addIntent = Intent(this, AddCameraActivity::class.java).apply {
+                    putExtra(AddCameraActivity.EXTRA_WS_URL, wsUrl)
+                    putExtra(AddCameraActivity.EXTRA_PASSWORD, password)
+                }
+                @Suppress("DEPRECATION")
+                startActivities(arrayOf(listIntent, addIntent))
             }
         }
     }
