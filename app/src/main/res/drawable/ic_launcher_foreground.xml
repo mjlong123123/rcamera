@@ -4,27 +4,64 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path android:pathData="M31,63.928c0,0 6.4,-11 12.1,-13.1c7.2,-2.6 26,-1.4 26,-1.4l38.1,38.1L107,108.928l-32,-1L31,63.928z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:endX="85.84757"
-                android:endY="92.4963"
-                android:startX="42.9492"
-                android:startY="49.59793"
-                android:type="linear">
-                <item
-                    android:color="#44000000"
-                    android:offset="0.0" />
-                <item
-                    android:color="#00000000"
-                    android:offset="1.0" />
-            </gradient>
-        </aapt:attr>
-    </path>
+
+    <!-- Camera body - rounded rectangle -->
     <path
-        android:fillColor="#FFFFFF"
-        android:fillType="nonZero"
-        android:pathData="M65.3,45.828l3.8,-6.6c0.2,-0.4 0.1,-0.9 -0.3,-1.1c-0.4,-0.2 -0.9,-0.1 -1.1,0.3l-3.9,6.7c-6.3,-2.8 -13.4,-2.8 -19.7,0l-3.9,-6.7c-0.2,-0.4 -0.7,-0.5 -1.1,-0.3C38.8,38.328 38.7,38.828 38.9,39.228l3.8,6.6C36.2,49.428 31.7,56.028 31,63.928h46C76.3,56.028 71.8,49.428 65.3,45.828zM43.4,57.328c-0.8,0 -1.5,-0.5 -1.8,-1.2c-0.3,-0.7 -0.1,-1.5 0.4,-2.1c0.5,-0.5 1.4,-0.7 2.1,-0.4c0.7,0.3 1.2,1 1.2,1.8C45.3,56.528 44.5,57.328 43.4,57.328L43.4,57.328zM64.6,57.328c-0.8,0 -1.5,-0.5 -1.8,-1.2s-0.1,-1.5 0.4,-2.1c0.5,-0.5 1.4,-0.7 2.1,-0.4c0.7,0.3 1.2,1 1.2,1.8C66.5,56.528 65.6,57.328 64.6,57.328L64.6,57.328z"
-        android:strokeWidth="1"
-        android:strokeColor="#00000000" />
+        android:pathData="M34,42L62,42C63.1,42 64,42.9 64,44L64,68C64,69.1 63.1,70 62,70L34,70C32.9,70 32,69.1 32,68L32,44C32,42.9 32.9,42 34,42Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Camera lens outer ring -->
+    <path
+        android:pathData="M48,47C43.58,47 40,50.58 40,55C40,59.42 43.58,63 48,63C52.42,63 56,59.42 56,55C56,50.58 52.42,47 48,47Z"
+        android:fillColor="#B0BEC5" />
+
+    <!-- Camera lens inner -->
+    <path
+        android:pathData="M48,49.5C44.96,49.5 42.5,51.96 42.5,55C42.5,58.04 44.96,60.5 48,60.5C51.04,60.5 53.5,58.04 53.5,55C53.5,51.96 51.04,49.5 48,49.5Z"
+        android:fillColor="#37474F" />
+
+    <!-- Camera lens highlight -->
+    <path
+        android:pathData="M48,51C46.07,51 44.5,52.57 44.5,54.5C44.5,56.43 46.07,58 48,58C49.93,58 51.5,56.43 51.5,54.5C51.5,52.57 49.93,51 48,51Z"
+        android:fillColor="#1A237E" />
+
+    <!-- Lens reflection dot -->
+    <path
+        android:pathData="M46,53.5C46,52.67 46.67,52 47.5,52C48.33,52 49,52.67 49,53.5C49,54.33 48.33,55 47.5,55C46.67,55 46,54.33 46,53.5Z"
+        android:fillColor="#5C6BC0" />
+
+    <!-- Camera recording indicator dot -->
+    <path
+        android:pathData="M60,45.5C60,44.67 60.67,44 61.5,44C62.33,44 63,44.67 63,45.5C63,46.33 62.33,47 61.5,47C60.67,47 60,46.33 60,45.5Z"
+        android:fillColor="#EF5350" />
+
+    <!-- Wireless signal arc 1 (smallest, closest) -->
+    <path
+        android:pathData="M68,40C70.5,42.5 72,46 72,50"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Wireless signal arc 2 (medium) -->
+    <path
+        android:pathData="M72,36C76,40 78,45 78,50"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Wireless signal arc 3 (largest, farthest) -->
+    <path
+        android:pathData="M76,32C81.5,37.5 84,44 84,50"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Small dot at signal origin -->
+    <path
+        android:pathData="M66,43C66,41.9 66.9,41 68,41C69.1,41 70,41.9 70,43C70,44.1 69.1,45 68,45C66.9,45 66,44.1 66,43Z"
+        android:fillColor="#FFFFFF" />
+
 </vector>

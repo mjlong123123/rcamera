@@ -45,6 +45,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.dragon.rcamera.data.CameraStore
+import com.dragon.rcamera.data.RemoteCamera
 import com.dragon.rcamera.rtp.H264Decoder
 import com.dragon.rcamera.rtp.RtpReceiver
 import com.dragon.rcamera.ui.theme.RCameraTheme
@@ -126,7 +128,21 @@ fun CameraViewerScreen(
     var hasBeenConnected by remember { mutableStateOf(false) }
     var showAuthFailedDialog by remember { mutableStateOf(false) }
     var retryPassword by remember { mutableStateOf(password) }
+    var passwordChanged by remember { mutableStateOf(false) }
     var showErrorDialog by remember { mutableStateOf(false) }
+
+    // Save new password to CameraStore when reconnection succeeds with a different password
+    LaunchedEffect(connectionState, passwordChanged) {
+        if (connectionState == WsClientState.CONNECTED && passwordChanged && retryPassword != password) {
+            val store = CameraStore(context)
+            val cameras = store.getCameras()
+            val camera = cameras.find { it.wsUrl == wsUrl }
+            if (camera != null && camera.password != retryPassword) {
+                store.updateCamera(camera.copy(password = retryPassword))
+            }
+            passwordChanged = false
+        }
+    }
 
     // Update debug info periodically + calculate network speed
     LaunchedEffect(rtpReceiver, h264Decoder) {
@@ -324,6 +340,7 @@ fun CameraViewerScreen(
                         TextButton(onClick = {
                             showAuthFailedDialog = false
                             hasBeenConnected = false
+                            passwordChanged = true
                             wsManager.stop()
                             wsManager.connectAsClient(wsUrl, retryPassword)
                         }) {

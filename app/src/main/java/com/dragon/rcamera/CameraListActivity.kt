@@ -97,11 +97,11 @@ fun CameraListScreen(onBack: () -> Unit) {
         addCameraLauncher.launch(Intent(context, AddCameraActivity::class.java))
     }
 
-    // 查看摄像头结果回调（退出预览后刷新列表）
+    // 查看摄像头结果回调（退出预览后刷新列表，同步密码等变更）
     val viewerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
-        // Viewer activity exited, connections are auto-cleaned
+        cameras = cameraStore.getCameras()
     }
 
     // 刷新列表
