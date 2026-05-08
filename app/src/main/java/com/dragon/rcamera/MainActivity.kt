@@ -20,10 +20,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiTethering
@@ -191,13 +193,25 @@ fun MainScreen(modifier: Modifier = Modifier) {
 
             // LAN setup guide card
             ActionCard(
-                icon = Icons.Default.MenuBook,
+                icon = Icons.AutoMirrored.Filled.MenuBook,
                 title = "外网连接配置教程",
                 description = "了解如何配置光猫和路由器，使外网手机可以连接局域网内的远程摄像头",
                 iconTint = MaterialTheme.colorScheme.tertiary,
                 iconBackgroundColor = MaterialTheme.colorScheme.tertiaryContainer,
                 onClick = {
                     context.startActivity(Intent(context, LanSetupGuideActivity::class.java))
+                }
+            )
+
+            // About card
+            ActionCard(
+                icon = Icons.Default.Person,
+                title = "关于",
+                description = "查看应用信息与开发者介绍",
+                iconTint = MaterialTheme.colorScheme.primary,
+                iconBackgroundColor = primaryContainerColor,
+                onClick = {
+                    context.startActivity(Intent(context, AboutActivity::class.java))
                 }
             )
         }

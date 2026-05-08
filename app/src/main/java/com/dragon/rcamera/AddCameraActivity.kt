@@ -70,7 +70,15 @@ class AddCameraActivity : ComponentActivity() {
             RCameraTheme {
                 AddCameraScreen(
                     onBack = { finish() },
-                    onSaved = { finish() },
+                    onSaved = { wsUrl, password, name ->
+                        val intent = Intent(this, CameraViewerActivity::class.java).apply {
+                            putExtra(CameraViewerActivity.EXTRA_WS_URL, wsUrl)
+                            putExtra(CameraViewerActivity.EXTRA_PASSWORD, password)
+                            putExtra(CameraViewerActivity.EXTRA_CAMERA_NAME, name)
+                        }
+                        startActivity(intent)
+                        finish()
+                    },
                     prefillWsUrl = prefillWsUrl,
                     prefillPassword = prefillPassword
                 )
@@ -88,7 +96,7 @@ class AddCameraActivity : ComponentActivity() {
 @Composable
 fun AddCameraScreen(
     onBack: () -> Unit,
-    onSaved: () -> Unit,
+    onSaved: (wsUrl: String, password: String, name: String) -> Unit,
     prefillWsUrl: String? = null,
     prefillPassword: String? = null
 ) {
@@ -169,7 +177,7 @@ fun AddCameraScreen(
             password = password.trim()
         )
         cameraStore.addCamera(camera)
-        onSaved()
+        onSaved(camera.wsUrl, camera.password, camera.name)
     }
 
     Scaffold(

@@ -21,12 +21,12 @@ import androidx.camera.core.resolutionselector.ResolutionFilter
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
@@ -34,7 +34,9 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -213,10 +215,20 @@ class CameraActivity : ComponentActivity() {
 
 @Composable
 fun WaitingScreen() {
-    Box(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        androidx.compose.material3.CircularProgressIndicator(
+            modifier = Modifier.size(48.dp),
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "正在连接相机服务...",
-            modifier = Modifier.align(Alignment.Center)
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -574,50 +586,63 @@ fun CameraPreviewScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // 简洁的服务器状态栏
+            // 服务状态卡片
             Surface(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(12.dp),
                 color = if (isWsRunning)
-                    MaterialTheme.colorScheme.primaryContainer
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
                 else
-                    MaterialTheme.colorScheme.errorContainer
+                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
-                    Icon(
-                        imageVector = if (isWsRunning) Icons.Default.Check else Icons.Default.Close,
-                        contentDescription = null,
-                        tint = if (isWsRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
-                        modifier = Modifier.size(16.dp)
+                    // Status dot
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(
+                                color = if (isWsRunning) Color(0xFF4CAF50) else Color(0xFFF44336),
+                                shape = RoundedCornerShape(4.dp)
+                            )
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = if (isWsRunning) "服务器运行中" else "服务器未运行",
-                        style = MaterialTheme.typography.bodySmall
+                        text = if (isWsRunning) "服务运行中" else "服务未运行",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = if (isFrontCamera) "前置" else "后置",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    // Camera type tag
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer
+                    ) {
+                        Text(
+                            text = if (isFrontCamera) "前置" else "后置",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
                     if (isWsRunning) {
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "·",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "$clientCount 个客户端已连接",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer
+                        ) {
+                            Text(
+                                text = "$clientCount 个连接",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 }
             }
