@@ -76,6 +76,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private val binder = LocalBinder()
     private val wsManager = WebSocketManager()
     private var isCameraOpen = false
+    private var currentCameraSelector: CameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
     // WebSocket configuration
     private var wsPort: Int = -1
@@ -290,7 +291,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
             camera = provider.bindToLifecycle(
                 this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                currentCameraSelector,
                 previewUseCase
             )
             isCameraOpen = true
@@ -1188,7 +1189,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             // Bind to lifecycle
             camera = provider.bindToLifecycle(
                 this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                currentCameraSelector,
                 preview
             )
 
@@ -1223,6 +1224,76 @@ class RemoteCameraService : Service(), LifecycleOwner {
         } catch (e: Exception) {
             Log.e(TAG, "Error closing camera", e)
         }
+    }
+
+    /**
+     * Switch between front and back camera.
+     * Rebinds the camera with the opposite selector while maintaining 720p resolution.
+     * Returns true if the switch was initiated, false if camera is not available.
+     */
+    fun switchCamera(): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { switchCamera() }
+            return true
+        }
+
+        val provider = cameraProvider ?: return false
+        if (!isCameraOpen) return false
+
+        // Check if the target camera is available
+        val targetSelector = if (currentCameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        try {
+            if (!provider.hasCamera(targetSelector)) {
+                Log.w(TAG, "Target camera not available")
+                return false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking camera availability", e)
+            return false
+        }
+
+        currentCameraSelector = targetSelector
+        Log.d(TAG, "Switching camera to ${if (currentCameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) "FRONT" else "BACK"}")
+
+        // Unbind and rebind with new selector
+        try {
+            provider.unbindAll()
+            camera = null
+            isCameraOpen = false
+
+            if (useExternalPreview) {
+                // External preview mode - Activity owns the Preview use case
+                // Just rebind; Activity's preview will be re-bound via bindPreviewUseCase
+                // We need to notify the activity to re-bind
+                Log.d(TAG, "Camera switched in external preview mode, activity needs to re-bind")
+            } else {
+                // Service-owned preview mode - rebind with service preview
+                bindCamera()
+            }
+
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to switch camera", e)
+            // Revert selector on failure
+            currentCameraSelector = if (currentCameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            } else {
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            }
+            return false
+        }
+    }
+
+    /**
+     * Check if currently using the front camera.
+     */
+    fun isFrontCamera(): Boolean {
+        return currentCameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
     }
 
     /**

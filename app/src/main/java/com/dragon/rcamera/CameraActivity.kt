@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -133,7 +134,31 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun showCameraPreview() {
-        // Create Preview with resolution matching encoder (720x1280, 9:16 portrait)
+        setContent {
+            RCameraTheme {
+                CameraPreviewScreen(
+                    cameraService = cameraService,
+                    onCreatePreview = { svc ->
+                        createAndBindPreview(svc)
+                    },
+                    onPreviewSurfaceReady = { surface ->
+                        cameraService?.setPreviewSurface(surface)
+                    },
+                    onPreviewSurfaceDestroyed = {
+                        cameraService?.setPreviewSurface(null)
+                    },
+                    onSurfaceDestroyed = {
+                        preview?.setSurfaceProvider(null)
+                        preview = null
+                        cameraService?.clearSurfaceProvider()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun createAndBindPreview(service: RemoteCameraService) {
+        preview?.setSurfaceProvider(null)
         preview = Preview.Builder()
             .setResolutionSelector(
                 ResolutionSelector.Builder()
@@ -152,30 +177,11 @@ class CameraActivity : ComponentActivity() {
                     .build()
             )
             .build().also { p ->
-                cameraService?.getSurfaceProvider()?.let { provider ->
+                service.getSurfaceProvider()?.let { provider ->
                     p.setSurfaceProvider(provider)
                 }
-                cameraService?.bindPreviewUseCase(p)
+                service.bindPreviewUseCase(p)
             }
-
-        setContent {
-            RCameraTheme {
-                CameraPreviewScreen(
-                    cameraService = cameraService,
-                    onPreviewSurfaceReady = { surface ->
-                        cameraService?.setPreviewSurface(surface)
-                    },
-                    onPreviewSurfaceDestroyed = {
-                        cameraService?.setPreviewSurface(null)
-                    },
-                    onSurfaceDestroyed = {
-                        preview?.setSurfaceProvider(null)
-                        preview = null
-                        cameraService?.clearSurfaceProvider()
-                    }
-                )
-            }
-        }
     }
 
     private fun startAndBindService() {
@@ -218,6 +224,7 @@ fun WaitingScreen() {
 @Composable
 fun CameraPreviewScreen(
     cameraService: RemoteCameraService?,
+    onCreatePreview: (RemoteCameraService) -> Unit,
     onPreviewSurfaceReady: (Surface) -> Unit,
     onPreviewSurfaceDestroyed: () -> Unit,
     onSurfaceDestroyed: () -> Unit
@@ -231,8 +238,13 @@ fun CameraPreviewScreen(
     var showSettings by remember { mutableStateOf(false) }
     var serverPassword by remember { mutableStateOf(store.getServerPassword()) }
     var serverPort by remember { mutableStateOf(store.getServerPort().toString()) }
-    // Selected address for QR code: null means auto (preferred), or specific address
     var selectedQrAddress by remember { mutableStateOf<String?>(null) }
+    var isFrontCamera by remember { mutableStateOf(cameraService?.isFrontCamera() ?: false) }
+
+    // Bind preview on first composition
+    LaunchedEffect(cameraService) {
+        cameraService?.let { onCreatePreview(it) }
+    }
 
     // 定期刷新状态
     LaunchedEffect(cameraService) {
@@ -500,6 +512,22 @@ fun CameraPreviewScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        cameraService?.let { svc ->
+                            if (svc.switchCamera()) {
+                                isFrontCamera = svc.isFrontCamera()
+                                onCreatePreview(svc)
+                            } else {
+                                Toast.makeText(context, "无法切换摄像头", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }) {
+                        Icon(
+                            Icons.Default.Cameraswitch,
+                            contentDescription = "切换摄像头",
+                            tint = if (isFrontCamera) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")
                     }
@@ -536,6 +564,12 @@ fun CameraPreviewScreen(
                     Text(
                         text = if (isWsRunning) "服务器运行中" else "服务器未运行",
                         style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = if (isFrontCamera) "前置" else "后置",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
                     if (isWsRunning) {
                         Spacer(modifier = Modifier.width(12.dp))
