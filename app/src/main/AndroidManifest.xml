@@ -45,6 +45,9 @@
             android:name=".CameraViewerActivity"
             android:exported="false"
             android:keepScreenOn="true" />
+        <activity
+            android:name=".LanSetupGuideActivity"
+            android:exported="false" />
         <service
             android:name=".RemoteCameraService"
             android:exported="false"

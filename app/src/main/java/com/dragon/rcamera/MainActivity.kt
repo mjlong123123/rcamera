@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.WifiTethering
@@ -157,6 +158,18 @@ fun MainScreen(modifier: Modifier = Modifier) {
                 iconBackgroundColor = MaterialTheme.colorScheme.secondaryContainer,
                 onClick = {
                     context.startActivity(Intent(context, CameraListActivity::class.java))
+                }
+            )
+
+            // LAN setup guide card
+            ActionCard(
+                icon = Icons.Default.MenuBook,
+                title = "外网连接配置教程",
+                description = "了解如何配置光猫和路由器，使外网手机可以连接局域网内的远程摄像头",
+                iconTint = MaterialTheme.colorScheme.tertiary,
+                iconBackgroundColor = MaterialTheme.colorScheme.tertiaryContainer,
+                onClick = {
+                    context.startActivity(Intent(context, LanSetupGuideActivity::class.java))
                 }
             )
         }
