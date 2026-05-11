@@ -72,6 +72,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import com.dragon.rcamera.data.CameraStore
 import com.dragon.rcamera.ui.theme.RCameraTheme
 import com.dragon.rcamera.websocket.IpInfo
@@ -90,6 +91,9 @@ class CameraActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as RemoteCameraService.LocalBinder
             cameraService = binder.getService()
+            if(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)){
+                cameraService?.notifyActivityResumed()
+            }
             isBound = true
             showCameraPreview()
         }
