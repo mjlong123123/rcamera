@@ -1,6 +1,7 @@
 <resources>
     <string name="app_name">RCamera</string>
     <string name="camera_notification_channel_name">远程相机服务</string>
+    <string name="camera_notification_channel_description">用于显示相机服务状态的通知</string>
     <string name="camera_notification_title">相机服务运行中</string>
     <string name="camera_list_title">远程摄像头</string>
     <string name="add_camera_title">添加远程摄像头</string>

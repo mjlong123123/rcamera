@@ -141,8 +141,25 @@ class RemoteCameraService : Service(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
 
         createNotificationChannel()
-        Log.d(TAG, "Service show notification (id=$NOTIFICATION_ID)")
-        startForeground(NOTIFICATION_ID, buildNotification())
+        
+        val notification = buildNotification()
+        Log.d(TAG, "Service show notification (id=$NOTIFICATION_ID), notification=$notification")
+        
+        try {
+            val result = startForeground(NOTIFICATION_ID, notification)
+            Log.d(TAG, "startForeground result: $result")
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed", e)
+            // Retry after a short delay for ColorOS/EMUI devices
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    startForeground(NOTIFICATION_ID, buildNotification())
+                    Log.d(TAG, "startForeground retry successful")
+                } catch (e2: Exception) {
+                    Log.e(TAG, "startForeground retry failed", e2)
+                }
+            }, 500)
+        }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         initCamera()
@@ -1412,14 +1429,32 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
     private fun createNotificationChannel() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            
+            // Check if channel already exists
+            val existingChannel = manager.getNotificationChannel(CHANNEL_ID)
+            if (existingChannel != null) {
+                Log.d(TAG, "Notification channel already exists: ${existingChannel.importance}")
+                return
+            }
+            
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.camera_notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
+                NotificationManager.IMPORTANCE_HIGH  // Use HIGH for better visibility on ColorOS/MIUI
+            ).apply {
+                description = getString(R.string.camera_notification_channel_description)
+                setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            }
             manager.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created: $CHANNEL_ID")
+            Log.d(TAG, "Notification channel created: $CHANNEL_ID with IMPORTANCE_HIGH")
+            
+            // Verify channel was created
+            val createdChannel = manager.getNotificationChannel(CHANNEL_ID)
+            Log.d(TAG, "Channel verification: importance=${createdChannel?.importance}")
         }
     }
 
@@ -1449,6 +1484,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
             .setSmallIcon(R.drawable.ic_camera_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setShowWhen(false)  // Hide timestamp
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)  // Mark as service notification
+            .setPriority(NotificationCompat.PRIORITY_HIGH)  // Higher priority for ColorOS/EMUI
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)  // Show on lock screen
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
