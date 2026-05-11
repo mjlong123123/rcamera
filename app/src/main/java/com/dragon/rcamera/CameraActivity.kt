@@ -10,7 +10,6 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Surface
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -114,8 +113,6 @@ class CameraActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
@@ -126,6 +123,16 @@ class CameraActivity : ComponentActivity() {
         }
 
         showWaitingScreen()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        cameraService?.notifyActivityResumed()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        cameraService?.notifyActivityPaused()
     }
 
     private fun showWaitingScreen() {
@@ -204,6 +211,8 @@ class CameraActivity : ComponentActivity() {
 
     override fun onDestroy() {
         cameraService?.clearSurfaceProvider()
+        // Force disconnect all WS/RTP clients before stopping service
+        cameraService?.stopWebSocketServer()
         if (isBound) {
             unbindService(connection)
             isBound = false

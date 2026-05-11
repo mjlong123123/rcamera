@@ -71,6 +71,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
     private var surfaceProvider: Preview.SurfaceProvider? = null
     private var wrapperSurfaceProvider: Preview.SurfaceProvider? = null
     private var useExternalPreview = false  // true when Activity uses getSurfaceProvider() mode
+    private var externalPreview: Preview? = null  // saved for rebind after camera restart
+    private var isActivityVisible = false  // tracks whether CameraActivity is in foreground
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val binder = LocalBinder()
@@ -142,7 +144,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
         Log.d(TAG, "Service show notification (id=$NOTIFICATION_ID)")
         startForeground(NOTIFICATION_ID, buildNotification())
 
-        acquireWakeLock()
         cameraExecutor = Executors.newSingleThreadExecutor()
         initCamera()
 
@@ -151,6 +152,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
         wsPort = store.getServerPort()
         wsPassword = store.getServerPassword()
         startWebSocketIfConfigured()
+
+        updateWakeLockState()
     }
 
     override fun onBind(intent: Intent?): IBinder {
@@ -267,6 +270,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
      */
     fun bindPreviewUseCase(previewUseCase: Preview) {
         useExternalPreview = true
+        externalPreview = previewUseCase
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Handler(Looper.getMainLooper()).post { bindPreviewUseCase(previewUseCase) }
             return
@@ -278,10 +282,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
             Handler(Looper.getMainLooper()).postDelayed({ bindPreviewUseCase(previewUseCase) }, 100)
             return
         }
-        if (isCameraOpen) return
 
         try {
             provider.unbindAll()
+            isCameraOpen = false
 
             // Initialize OpenGL if not done
             if (!initializeOpenGl()) {
@@ -357,10 +361,6 @@ class RemoteCameraService : Service(), LifecycleOwner {
         wrapperSurfaceProvider = null
         useExternalPreview = false
         releasePreviewSurface()
-        // Check if we should close camera
-        if (!hasEncoderSurface() && !hasPreviewSurface()) {
-            closeCamera()
-        }
     }
 
     // ===== WebSocket Server =====
@@ -458,8 +458,13 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 broadcastCameraStatus()
             }
             WsMessage.ACTION_CLOSE_CAMERA -> {
-                closeCamera()
-                val response = message.makeResponse(true, mapOf("camera_open" to false))
+                if (!isEncoding) {
+                    closeCamera()
+                    Log.d(TAG, "Camera closed via WS close_camera (encoding inactive)")
+                } else {
+                    Log.d(TAG, "WS close_camera ignored: encoding active, camera stays on")
+                }
+                val response = message.makeResponse(true, mapOf("camera_open" to isCameraOpen))
                 wsManager.sendToClient(conn, response)
                 Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
                 broadcastCameraStatus()
@@ -901,7 +906,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
                     synchronized(frameLock) {
                         while (!isFrameAvailable.get() && isRunning) {
                             try {
-                                frameLock.wait(100)
+                                frameLock.wait(100000)
                             } catch (e: InterruptedException) {
                                 break
                             }
@@ -965,6 +970,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 createEncoderSurface()
                 isEncoding = true
                 Log.d(TAG, "Encoding and RTP started with surface input")
+                updateCameraState()
+                updateWakeLockState()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start encoding", e)
             }
@@ -981,6 +988,8 @@ class RemoteCameraService : Service(), LifecycleOwner {
             clientRtpPorts.clear()
             clientAddresses.clear()
             Log.d(TAG, "Encoding and RTP stopped")
+            updateCameraState()
+            updateWakeLockState()
         }
     }
 
@@ -1136,65 +1145,75 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 return
             }
 
-            // When using getSurfaceProvider() mode, Activity creates its own Preview
-            // and binds it to the service's lifecycle. Just bind the use case.
-            // Only create a service-owned Preview if no external provider is set.
-            if (!useExternalPreview && surfaceProvider == null && wrapperSurfaceProvider == null) {
-                // Create service-owned Preview
-                preview = Preview.Builder()
-                    .setResolutionSelector(
-                        ResolutionSelector.Builder()
-                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-                            .setResolutionFilter(object : ResolutionFilter {
-                                override fun filter(
-                                    supportedSizes: MutableList<android.util.Size>,
-                                    rotationDegrees: Int
-                                ): MutableList<android.util.Size> {
-                                    val maxMegaPixels = 1920 * 1080
-                                    val targetPixels = 1280 * 720
-                                    val candidates = supportedSizes.filter {
-                                        it.width * it.height <= maxMegaPixels
-                                    }
-                                    val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
-                                    return source.sortedBy {
-                                        Math.abs(it.width * it.height - targetPixels)
-                                    }.toMutableList()
-                                }
-                            })
-                            .build()
-                    )
-                    .build()
-
-                val surfaceTexture = cameraSurfaceTexture
-                if (surfaceTexture == null) {
-                    Log.e(TAG, "No SurfaceTexture available")
-                    return
+            // Determine which preview use case to bind
+            val useCaseToBind: Preview? = when {
+                useExternalPreview && externalPreview != null -> {
+                    Log.d(TAG, "bindCamera: rebinding stored external preview")
+                    externalPreview
                 }
+                !useExternalPreview && surfaceProvider == null && wrapperSurfaceProvider == null -> {
+                    // Create service-owned Preview
+                    val newPreview = Preview.Builder()
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                .setResolutionFilter(object : ResolutionFilter {
+                                    override fun filter(
+                                        supportedSizes: MutableList<android.util.Size>,
+                                        rotationDegrees: Int
+                                    ): MutableList<android.util.Size> {
+                                        val maxMegaPixels = 1920 * 1080
+                                        val targetPixels = 1280 * 720
+                                        val candidates = supportedSizes.filter {
+                                            it.width * it.height <= maxMegaPixels
+                                        }
+                                        val source = if (candidates.isNotEmpty()) candidates else supportedSizes.toList()
+                                        return source.sortedBy {
+                                            Math.abs(it.width * it.height - targetPixels)
+                                        }.toMutableList()
+                                    }
+                                })
+                                .build()
+                        )
+                        .build()
 
-                preview?.setSurfaceProvider(object : Preview.SurfaceProvider {
-                    override fun onSurfaceRequested(request: androidx.camera.core.SurfaceRequest) {
-                        val resolution = request.resolution
-                        surfaceTexture.setDefaultBufferSize(resolution.width, resolution.height)
-                        val surface = Surface(surfaceTexture)
-                        request.provideSurface(surface, cameraExecutor) { result ->
-                            Log.d(TAG, "Camera surface released")
-                            surface.release()
-                        }
+                    val surfaceTexture = cameraSurfaceTexture
+                    if (surfaceTexture == null) {
+                        Log.e(TAG, "No SurfaceTexture available")
+                        return
                     }
-                })
-            } else {
-                Log.d(TAG, "Skipping auto surface provider setup (using getSurfaceProvider() mode)")
+
+                    newPreview.setSurfaceProvider(object : Preview.SurfaceProvider {
+                        override fun onSurfaceRequested(request: androidx.camera.core.SurfaceRequest) {
+                            val resolution = request.resolution
+                            surfaceTexture.setDefaultBufferSize(resolution.width, resolution.height)
+                            val surface = Surface(surfaceTexture)
+                            request.provideSurface(surface, cameraExecutor) { result ->
+                                Log.d(TAG, "Camera surface released")
+                                surface.release()
+                            }
+                        }
+                    })
+                    preview = newPreview
+                    newPreview
+                }
+                else -> {
+                    Log.d(TAG, "bindCamera: using existing surface provider mode")
+                    preview
+                }
             }
 
-            // Bind to lifecycle
-            camera = provider.bindToLifecycle(
-                this,
-                currentCameraSelector,
-                preview
-            )
-
-            isCameraOpen = true
-            Log.d(TAG, "Camera bound with preview (isEncoding=$isEncoding)")
+            if (useCaseToBind != null) {
+                camera = provider.bindToLifecycle(
+                    this,
+                    currentCameraSelector,
+                    useCaseToBind
+                )
+                isCameraOpen = true
+                Log.d(TAG, "Camera bound with use case (isEncoding=$isEncoding)")
+            } else {
+                Log.w(TAG, "bindCamera: no use case to bind")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to bind camera", e)
         }
@@ -1223,6 +1242,67 @@ class RemoteCameraService : Service(), LifecycleOwner {
             isCameraOpen = false
         } catch (e: Exception) {
             Log.e(TAG, "Error closing camera", e)
+        }
+    }
+
+    // ===== Activity Visibility & Camera Lifecycle =====
+
+    /**
+     * Called by CameraActivity when it resumes (becomes visible).
+     */
+    fun notifyActivityResumed() {
+        Log.d(TAG, "Activity resumed -> isActivityVisible=true")
+        isActivityVisible = true
+        updateCameraState()
+        updateWakeLockState()
+    }
+
+    /**
+     * Called by CameraActivity when it pauses (goes to background).
+     */
+    fun notifyActivityPaused() {
+        Log.d(TAG, "Activity paused -> isActivityVisible=false")
+        isActivityVisible = false
+        updateCameraState()
+        updateWakeLockState()
+    }
+
+    /**
+     * Central decision point for camera lifecycle.
+     * Camera is on when: activity is visible (local preview) OR encoding is active (RTP streaming).
+     * Camera is off when: activity is not visible AND no encoding.
+     */
+    private fun updateCameraState() {
+        val shouldCameraBeOn = isActivityVisible || isEncoding
+        if (shouldCameraBeOn && !isCameraOpen) {
+            Log.d(TAG, "updateCameraState: starting camera (visible=$isActivityVisible, encoding=$isEncoding)")
+            bindCamera()
+        } else if (!shouldCameraBeOn && isCameraOpen) {
+            Log.d(TAG, "updateCameraState: stopping camera (visible=$isActivityVisible, encoding=$isEncoding)")
+            closeCamera()
+        }
+    }
+
+    /**
+     * Conditionally hold/release wake lock.
+     * Wake lock is held when: activity is visible OR encoding is active.
+     */
+    private fun updateWakeLockState() {
+        val shouldHoldWakeLock = isActivityVisible || isEncoding || wsManager.isServerRunning()
+        if (shouldHoldWakeLock) {
+            if (wakeLock == null) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "RCamera::RemoteCameraWakeLock"
+                )
+            }
+            if (!wakeLock!!.isHeld) {
+                wakeLock!!.acquire()
+                Log.d(TAG, "WakeLock acquired")
+            }
+        } else {
+            releaseWakeLock()
         }
     }
 
