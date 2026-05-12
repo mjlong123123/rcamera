@@ -28,10 +28,14 @@ android {
             val properties = Properties().apply {
                 load(project.rootProject.file("local.properties").inputStream())
             }
-            keyAlias = properties.getProperty("keystore.alias")
-            keyPassword = properties.getProperty("keystore.password")
+            fun resolveProperty(value: String): String {
+                val propFile = file(value)
+                return if (propFile.isFile) propFile.readText().trim() else value
+            }
+            keyAlias = resolveProperty(properties.getProperty("keystore.alias"))
+            keyPassword = resolveProperty(properties.getProperty("keystore.password"))
             storeFile = file(properties.getProperty("keystore.file"))
-            storePassword = properties.getProperty("keystore.password")
+            storePassword = resolveProperty(properties.getProperty("keystore.password"))
         }
     }
 
