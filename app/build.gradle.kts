@@ -17,8 +17,8 @@ android {
         applicationId = "com.dragon.rcamera"
         minSdk = 24
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.2"
+        versionCode = 13
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

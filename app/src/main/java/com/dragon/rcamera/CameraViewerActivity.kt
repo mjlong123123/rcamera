@@ -400,21 +400,21 @@ fun CameraViewerScreen(
                 }
 
                 // Debug info overlay — bottom-right
-                if (debugInfo.isNotBlank() && isReceiving) {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color.Black.copy(alpha = 0.45f),
-                        modifier = Modifier.align(Alignment.BottomEnd)
-                    ) {
-                        Text(
-                            text = debugInfo,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                }
+//                if (debugInfo.isNotBlank() && isReceiving) {
+//                    Surface(
+//                        shape = RoundedCornerShape(8.dp),
+//                        color = Color.Black.copy(alpha = 0.45f),
+//                        modifier = Modifier.align(Alignment.BottomEnd)
+//                    ) {
+//                        Text(
+//                            text = debugInfo,
+//                            style = MaterialTheme.typography.labelSmall,
+//                            color = Color.White.copy(alpha = 0.8f),
+//                            fontFamily = FontFamily.Monospace,
+//                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+//                        )
+//                    }
+//                }
             }
 
             // AUTH_FAILED dialog — password input for retry
