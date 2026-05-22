@@ -28,7 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -52,7 +52,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -108,9 +107,51 @@ fun CameraListScreen(onBack: () -> Unit) {
         cameras = cameraStore.getCameras()
     }
 
+    // 摄像头信息对话框状态
+    var showInfoDialog by remember { mutableStateOf(false) }
+    var infoCamera by remember { mutableStateOf<RemoteCamera?>(null) }
+
     // 刷新列表
     LaunchedEffect(refreshKey) {
         cameras = cameraStore.getCameras()
+    }
+
+    // 摄像头信息对话框
+    if (showInfoDialog && infoCamera != null) {
+        val cam = infoCamera!!
+        AlertDialog(
+            onDismissRequest = { showInfoDialog = false },
+            title = { Text(cam.name, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column {
+                    Text("端口: ${cam.port}", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val ipv4s = cam.ipv4Addresses ?: emptyList()
+                    val ipv6s = cam.ipv6Addresses ?: emptyList()
+                    if (ipv4s.isNotEmpty()) {
+                        Text("IPv4:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ipv4s.forEach {
+                            Text("  $it", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    if (ipv6s.isNotEmpty()) {
+                        Text("IPv6:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ipv6s.forEach {
+                            Text("  $it", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (ipv4s.isEmpty() && ipv6s.isEmpty()) {
+                        Text("地址: ${cam.wsUrl}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showInfoDialog = false }) {
+                    Text("关闭")
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -211,12 +252,19 @@ fun CameraListScreen(onBack: () -> Unit) {
                                 putExtra(CameraViewerActivity.EXTRA_WS_URL, camera.wsUrl)
                                 putExtra(CameraViewerActivity.EXTRA_PASSWORD, camera.password)
                                 putExtra(CameraViewerActivity.EXTRA_CAMERA_NAME, camera.name)
+                                putStringArrayListExtra(CameraViewerActivity.EXTRA_IPV4_ADDRESSES, ArrayList(camera.ipv4Addresses ?: emptyList()))
+                                putStringArrayListExtra(CameraViewerActivity.EXTRA_IPV6_ADDRESSES, ArrayList(camera.ipv6Addresses ?: emptyList()))
+                                putExtra(CameraViewerActivity.EXTRA_PORT, camera.port)
                             }
                             viewerLauncher.launch(intent)
                         },
                         onDelete = {
                             cameraStore.removeCamera(camera.id)
                             cameras = cameraStore.getCameras()
+                        },
+                        onShowInfo = {
+                            infoCamera = camera
+                            showInfoDialog = true
                         }
                     )
                 }
@@ -229,7 +277,8 @@ fun CameraListScreen(onBack: () -> Unit) {
 fun CameraListItem(
     camera: RemoteCamera,
     onClick: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onShowInfo: () -> Unit = {}
 ) {
     Card(
         onClick = onClick,
@@ -242,7 +291,7 @@ fun CameraListItem(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(start = 16.dp, top = 16.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
@@ -269,23 +318,6 @@ fun CameraListItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Link,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = camera.wsUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
                 Spacer(modifier = Modifier.height(6.dp))
                 Surface(
                     shape = RoundedCornerShape(6.dp),
@@ -298,6 +330,13 @@ fun CameraListItem(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                 }
+            }
+            IconButton(onClick = onShowInfo) {
+                Icon(
+                    Icons.Default.Info,
+                    contentDescription = "查看信息",
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                )
             }
             IconButton(onClick = onDelete) {
                 Icon(

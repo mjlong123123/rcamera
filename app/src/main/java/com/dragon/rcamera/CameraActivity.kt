@@ -21,7 +21,6 @@ import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionFilter
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,7 +67,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -268,7 +266,6 @@ fun CameraPreviewScreen(
     var showSettings by remember { mutableStateOf(false) }
     var serverPassword by remember { mutableStateOf(store.getServerPassword()) }
     var serverPort by remember { mutableStateOf(store.getServerPort().toString()) }
-    var selectedQrAddress by remember { mutableStateOf<String?>(null) }
     var isFrontCamera by remember { mutableStateOf(cameraService?.isFrontCamera() ?: false) }
 
     // Bind preview on first composition
@@ -315,206 +312,13 @@ fun CameraPreviewScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp)
             ) {
-                Column(modifier = Modifier.padding(24.dp)) {
-                    Text(
-                        text = "连接信息",
-                        style = MaterialTheme.typography.headlineSmall
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Column(
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .verticalScroll(rememberScrollState())
-                            .imePadding()
-                    ) {
-                    // 连接信息
-                    if (isWsRunning && ipInfo != null) {
-                        val info = ipInfo!!
-                        val port = serverPort.toIntOrNull() ?: 8888
-
-                        Text(
-                            text = "选择连接地址",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // IPv6 address row
-                        if (info.ipv6Address != null) {
-                            val isIpv6Selected = selectedQrAddress == info.ipv6Address ||
-                                (selectedQrAddress == null && info.preferredAddress == info.ipv6Address)
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedQrAddress = info.ipv6Address },
-                                shape = MaterialTheme.shapes.small,
-                                color = if (isIpv6Selected) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
-                                ) {
-                                    if (isIpv6Selected) {
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = "已选择",
-                                            modifier = Modifier.size(18.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "IPv6",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            text = "[${info.ipv6Address}]:$port",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = FontFamily.Monospace,
-                                            maxLines = 2,
-                                            softWrap = true
-                                        )
-                                    }
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                        }
-
-                        // IPv4 address row
-                        if (info.ipv4Address != null) {
-                            val isIpv4Selected = selectedQrAddress == info.ipv4Address ||
-                                (selectedQrAddress == null && info.preferredAddress == info.ipv4Address)
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedQrAddress = info.ipv4Address },
-                                shape = MaterialTheme.shapes.small,
-                                color = if (isIpv4Selected) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
-                                ) {
-                                    if (isIpv4Selected) {
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = "已选择",
-                                            modifier = Modifier.size(18.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                    }
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "IPv4",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            text = "${info.ipv4Address}:$port",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                    }
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                        }
-
-                        // Connection type hint based on selected address
-                        val selectedAddr = selectedQrAddress ?: info.preferredAddress
-                        val isIpv6 = selectedAddr == info.ipv6Address
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = MaterialTheme.shapes.small,
-                            color = if (isIpv6)
-                                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-                            else
-                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isIpv6) Icons.Default.Check else Icons.Default.Warning,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = if (isIpv6) Color(0xFF4CAF50) else Color(0xFFFFC107)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (isIpv6)
-                                        "IPv6 地址支持外网连接，远程设备可直接访问"
-                                    else
-                                        "IPv4 地址仅限局域网内连接，外网无法直接访问",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isIpv6)
-                                        MaterialTheme.colorScheme.onTertiaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onErrorContainer
-                                )
-                            }
-                        }
-
-                        // QR Code with rcamera:// scheme
-                        Spacer(modifier = Modifier.height(16.dp))
-                        val qrAddress = selectedQrAddress ?: info.preferredAddress
-                        val wsUrlForQr = cameraService?.getWsServerUrlForAddress(qrAddress) ?: wsUrl
-                        if (wsUrlForQr.isNotBlank()) {
-                            // Generate rcamera:// scheme URL
-                            val schemeUrl = buildString {
-                                append("rcamera://add?wsUrl=")
-                                append(android.net.Uri.encode(wsUrlForQr))
-                                append("&port=")
-                                append(port)
-                                append("&password=")
-                                append(android.net.Uri.encode(serverPassword))
-                            }
-                            val qrBitmap = remember(schemeUrl) {
-                                generateQrBitmap(schemeUrl, 256)
-                            }
-
-                            Text(
-                                text = "扫码添加摄像头",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "使用另一台手机扫描下方二维码，即可添加此摄像头",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            qrBitmap?.let {
-                                Image(
-                                    bitmap = it.asImageBitmap(),
-                                    contentDescription = "二维码",
-                                    modifier = Modifier
-                                        .size(180.dp)
-                                        .aspectRatio(1f)
-                                        .align(Alignment.CenterHorizontally)
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "点击上方地址可切换 IPv4/IPv6",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.align(Alignment.CenterHorizontally)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                    }
-
-                    // 服务器配置
+                Column(
+                    modifier = Modifier
+                        .padding(24.dp)
+                        .verticalScroll(rememberScrollState())
+                        .imePadding()
+                ) {
+                    // 服务器配置 - 置顶
                     Text(
                         text = "服务器配置",
                         style = MaterialTheme.typography.titleSmall,
@@ -536,7 +340,94 @@ fun CameraPreviewScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                }
+
+                    // 二维码 - 仅当 WS 运行且有 IP 信息时
+                    if (isWsRunning && ipInfo != null) {
+                        val info = ipInfo!!
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text(
+                            text = "扫码添加摄像头",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "使用另一台手机扫描下方二维码，即可添加此摄像头",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Generate QR content with all IPs encoded as base64 JSON
+                        val port = serverPort.toIntOrNull() ?: 8888
+                        val qrContent = remember(info, serverPassword, port) {
+                            val json = com.google.gson.JsonObject().apply {
+                                add("ipv4", com.google.gson.JsonArray().apply {
+                                    info.ipv4Addresses.forEach { add(it) }
+                                })
+                                add("ipv6", com.google.gson.JsonArray().apply {
+                                    info.ipv6Addresses.forEach { add(it) }
+                                })
+                                addProperty("port", port)
+                                addProperty("password", serverPassword)
+                            }
+                            val jsonStr = json.toString()
+                            val encoded = android.util.Base64.encodeToString(
+                                jsonStr.toByteArray(),
+                                android.util.Base64.NO_WRAP
+                            )
+                            "rcamera://add?d=$encoded"
+                        }
+                        val qrBitmap = remember(qrContent) {
+                            generateQrBitmap(qrContent, 256)
+                        }
+                        qrBitmap?.let {
+                            Image(
+                                bitmap = it.asImageBitmap(),
+                                contentDescription = "二维码",
+                                modifier = Modifier
+                                    .size(180.dp)
+                                    .aspectRatio(1f)
+                                    .align(Alignment.CenterHorizontally)
+                            )
+                        }
+
+                        // 外网连接状态指示器
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.small,
+                            color = if (!info.isLan)
+                                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
+                            else
+                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (!info.isLan) Icons.Default.Check else Icons.Default.Warning,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = if (!info.isLan) Color(0xFF4CAF50) else Color(0xFFFFC107)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (!info.isLan)
+                                        "支持外网连接，远程设备可直接访问"
+                                    else
+                                        "仅限局域网内连接，外网无法直接访问",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (!info.isLan)
+                                        MaterialTheme.colorScheme.onTertiaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(24.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),

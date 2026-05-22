@@ -15,12 +15,10 @@ typealias WsServerMessageHandler = (conn: WebSocket, message: WsMessage) -> Unit
 typealias WsServerConnectionHandler = (conn: WebSocket) -> Unit
 
 data class IpInfo(
-    val ipv6Address: String?,      // IPv6 address (available if device has IPv6)
-    val ipv4Address: String?,      // IPv4 address (available if device has IPv4)
-    val isIpv6Lan: Boolean,        // Whether IPv6 is a LAN address
-    val isIpv4Lan: Boolean,        // Whether IPv4 is a LAN address
-    val preferredAddress: String,  // The preferred address for display (IPv6 if available)
-    val isLan: Boolean             // Whether the preferred address is LAN
+    val ipv6Addresses: List<String>,      // All IPv6 addresses
+    val ipv4Addresses: List<String>,      // All IPv4 addresses
+    val preferredAddress: String,         // The preferred address (first global IPv6, or first non-global IPv6, or first IPv4)
+    val isLan: Boolean                    // Whether only LAN addresses are available
 ) {
     /**
      * Generate WebSocket URL for the given address and port.
@@ -29,18 +27,6 @@ data class IpInfo(
         val host = if (address.contains(":")) "[$address]" else address
         return "ws://$host:$port"
     }
-
-    /**
-     * Build URL using IPv6 address, or null if not available.
-     */
-    fun getIpv6WsUrl(port: Int): String? =
-        ipv6Address?.let { buildWsUrl(it, port) }
-
-    /**
-     * Build URL using IPv4 address, or null if not available.
-     */
-    fun getIpv4WsUrl(port: Int): String? =
-        ipv4Address?.let { buildWsUrl(it, port) }
 }
 
 class WsServer(
@@ -176,80 +162,46 @@ class WsServer(
     }
 
     fun getIpInfo(): IpInfo {
-        var ipv6Global: String? = null
-        var ipv6LinkLocal: String? = null
-        var ipv4: String? = null
+        val ipv6List = mutableListOf<String>()
+        val ipv4List = mutableListOf<String>()
 
         try {
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return IpInfo(null, "0.0.0.0", false, false, "0.0.0.0", false)
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return IpInfo(
+                emptyList(), emptyList(), "0.0.0.0", false
+            )
             for (intf in interfaces) {
                 if (!intf.isUp || intf.isLoopback) continue
                 for (addr in intf.inetAddresses) {
                     if (addr.isLoopbackAddress) continue
                     when (addr) {
                         is Inet6Address -> {
-                            // Strip scope ID (e.g., "fe80::1%wlan0" -> "fe80::1")
                             val cleanAddr = addr.hostAddress?.substringBefore("%") ?: continue
-                            if (isIpv6LinkLocalAddress(addr)) {
-                                // Only use link-local as fallback
-                                if (ipv6LinkLocal == null) ipv6LinkLocal = cleanAddr
-                            } else if (!isIpv6LanAddress(addr)) {
-                                // Global unicast - preferred
-                                if (ipv6Global == null) ipv6Global = cleanAddr
-                            } else {
-                                // Unique local (fc00::/7) or site-local (fec0::/10)
-                                // Better than link-local but still LAN
-                                if (ipv6Global == null && ipv6LinkLocal == null && ipv6LinkLocal != cleanAddr) {
-                                    ipv6LinkLocal = cleanAddr
-                                }
+                            // Only collect global (non-LAN) IPv6 addresses
+                            if (!isIpv6LanAddress(addr)) {
+                                ipv6List.add(cleanAddr)
                             }
                         }
                         is Inet4Address -> {
-                            if (ipv4 == null) {
-                                ipv4 = addr.hostAddress
-                            }
+                            addr.hostAddress?.let { ipv4List.add(it) }
                         }
                     }
                 }
             }
         } catch (_: Exception) {}
 
-        // Prefer global IPv6 > link-local IPv6 > IPv4 for default display
-        val ipv6 = ipv6Global ?: ipv6LinkLocal
-        val isIpv6Lan = ipv6 != null && ipv6Global == null
-        val isIpv4Lan = ipv4 != null && isIpv4LanAddress(ipv4!!)
-
         val preferred = when {
-            ipv6 != null -> ipv6
-            ipv4 != null -> ipv4
+            ipv6List.isNotEmpty() -> ipv6List.first()
+            ipv4List.isNotEmpty() -> ipv4List.first()
             else -> "0.0.0.0"
         }
-        val isLan = when {
-            ipv6Global != null -> false
-            ipv6 != null -> true // link-local or unique-local IPv6
-            ipv4 != null -> isIpv4Lan
-            else -> false
-        }
+        val isLan = ipv6List.isEmpty()
 
         return IpInfo(
-            ipv6Address = ipv6,
-            ipv4Address = ipv4,  // Always provide IPv4 when available
-            isIpv6Lan = isIpv6Lan,
-            isIpv4Lan = isIpv4Lan,
+            ipv6Addresses = ipv6List,
+            ipv4Addresses = ipv4List,
             preferredAddress = preferred,
             isLan = isLan
         )
-    }
-
-    /**
-     * Check if an IPv6 address is a link-local address (fe80::/10).
-     * These are only valid within the same network segment.
-     */
-    private fun isIpv6LinkLocalAddress(addr: Inet6Address): Boolean {
-        val bytes = addr.address
-        val firstByte = bytes[0].toInt() and 0xFF
-        // fe80::/10 - link local
-        return firstByte == 0xFE && (bytes[1].toInt() and 0xC0) == 0x80
     }
 
     /**
@@ -273,16 +225,6 @@ class WsServer(
         return false
     }
 
-    private fun isIpv4LanAddress(ipv4: String): Boolean {
-        if (ipv4.startsWith("192.168.")) return true
-        if (ipv4.startsWith("10.")) return true
-        // 172.16.0.0 - 172.31.255.255 (RFC 1918)
-        if (ipv4.startsWith("172.")) {
-            val secondOctet = ipv4.removePrefix("172.").substringBefore(".").toIntOrNull() ?: return false
-            if (secondOctet in 16..31) return true
-        }
-        return false
-    }
 
     companion object {
         private const val TAG = "WsServer"

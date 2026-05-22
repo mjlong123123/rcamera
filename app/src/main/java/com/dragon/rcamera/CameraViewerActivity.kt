@@ -28,6 +28,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -70,6 +71,9 @@ class CameraViewerActivity : ComponentActivity() {
         const val EXTRA_WS_URL = "extra_ws_url"
         const val EXTRA_PASSWORD = "extra_password"
         const val EXTRA_CAMERA_NAME = "extra_camera_name"
+        const val EXTRA_IPV4_ADDRESSES = "extra_ipv4_addresses"
+        const val EXTRA_IPV6_ADDRESSES = "extra_ipv6_addresses"
+        const val EXTRA_PORT = "extra_port"
         private const val TAG = "CameraViewerActivity"
     }
 
@@ -88,6 +92,9 @@ class CameraViewerActivity : ComponentActivity() {
         }
         val password = intent.getStringExtra(EXTRA_PASSWORD) ?: ""
         val cameraName = intent.getStringExtra(EXTRA_CAMERA_NAME) ?: "远程摄像头"
+        val ipv4Addresses = intent.getStringArrayListExtra(EXTRA_IPV4_ADDRESSES)?.toList() ?: emptyList()
+        val ipv6Addresses = intent.getStringArrayListExtra(EXTRA_IPV6_ADDRESSES)?.toList() ?: emptyList()
+        val port = intent.getIntExtra(EXTRA_PORT, 8888)
 
         setContent {
             RCameraTheme {
@@ -95,6 +102,9 @@ class CameraViewerActivity : ComponentActivity() {
                     cameraName = cameraName,
                     wsUrl = wsUrl,
                     password = password,
+                    ipv4Addresses = ipv4Addresses,
+                    ipv6Addresses = ipv6Addresses,
+                    port = port,
                     wsManager = wsManager,
                     rtpReceiver = rtpReceiver,
                     h264Decoder = h264Decoder,
@@ -123,6 +133,9 @@ fun CameraViewerScreen(
     cameraName: String,
     wsUrl: String,
     password: String,
+    ipv4Addresses: List<String> = emptyList(),
+    ipv6Addresses: List<String> = emptyList(),
+    port: Int = 8888,
     wsManager: WebSocketManager,
     rtpReceiver: RtpReceiver,
     h264Decoder: H264Decoder,
@@ -141,6 +154,36 @@ fun CameraViewerScreen(
     var retryPassword by remember { mutableStateOf(password) }
     var passwordChanged by remember { mutableStateOf(false) }
     var showErrorDialog by remember { mutableStateOf(false) }
+
+    // Sequential connection state
+    val connectionAttemptUrls = remember {
+        buildList {
+            ipv4Addresses.forEach { add("ws://$it:$port") }
+            ipv6Addresses.forEach { add("ws://[$it]:$port") }
+            if (isEmpty()) add(wsUrl)
+        }
+    }
+    var currentAttemptUrl by remember { mutableStateOf(connectionAttemptUrls.firstOrNull() ?: wsUrl) }
+    var currentAttemptIndex by remember { mutableStateOf(0) }
+    var isRetrying by remember { mutableStateOf(false) }
+
+    // Retry effect: try next URL on connection failure
+    LaunchedEffect(isRetrying) {
+        if (isRetrying) {
+            val nextIndex = currentAttemptIndex + 1
+            if (nextIndex < connectionAttemptUrls.size) {
+                currentAttemptIndex = nextIndex
+                currentAttemptUrl = connectionAttemptUrls[nextIndex]
+                wsManager.stop()
+                kotlinx.coroutines.delay(100)
+                wsManager.connectAsClient(currentAttemptUrl, password)
+                isRetrying = false
+            } else {
+                isRetrying = false
+                showErrorDialog = true
+            }
+        }
+    }
 
     // Save new password to CameraStore when reconnection succeeds with a different password
     LaunchedEffect(connectionState, passwordChanged) {
@@ -207,7 +250,12 @@ fun CameraViewerScreen(
                 showAuthFailedDialog = true
             }
             if (state == WsClientState.ERROR) {
-                showErrorDialog = true
+                // Before first successful connection, try next URL sequentially
+                if (!hasBeenConnected && connectionAttemptUrls.size > 1) {
+                    isRetrying = true
+                } else {
+                    showErrorDialog = true
+                }
             }
         }
 
@@ -267,6 +315,23 @@ fun CameraViewerScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
+                },
+                actions = {
+                    IconButton(
+                        onClick = {
+                            wsManager.sendCommand(WsMessage.ACTION_SWITCH_CAMERA, com.google.gson.JsonObject())
+                        },
+                        enabled = connectionState == WsClientState.CONNECTED
+                    ) {
+                        Icon(
+                            Icons.Default.Cameraswitch,
+                            contentDescription = "切换摄像头",
+                            tint = if (connectionState == WsClientState.CONNECTED)
+                                MaterialTheme.colorScheme.onSurface
+                            else
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                        )
+                    }
                 }
             )
         }
@@ -290,7 +355,7 @@ fun CameraViewerScreen(
                                 holder.setFixedSize(720, 1280)
                                 h264Decoder.start(holder.surface)
                                 isSurfaceReady = true
-                                wsManager.connectAsClient(wsUrl, password)
+                                wsManager.connectAsClient(currentAttemptUrl, password)
                             }
 
                             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
@@ -441,8 +506,10 @@ fun CameraViewerScreen(
                             showAuthFailedDialog = false
                             hasBeenConnected = false
                             passwordChanged = true
+                            currentAttemptIndex = 0
+                            currentAttemptUrl = connectionAttemptUrls.firstOrNull() ?: wsUrl
                             wsManager.stop()
-                            wsManager.connectAsClient(wsUrl, retryPassword)
+                            wsManager.connectAsClient(currentAttemptUrl, retryPassword)
                         }) {
                             Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -472,8 +539,10 @@ fun CameraViewerScreen(
                         TextButton(onClick = {
                             showErrorDialog = false
                             hasBeenConnected = false
+                            currentAttemptIndex = 0
+                            currentAttemptUrl = connectionAttemptUrls.firstOrNull() ?: wsUrl
                             wsManager.stop()
-                            wsManager.connectAsClient(wsUrl, password)
+                            wsManager.connectAsClient(currentAttemptUrl, password)
                         }) {
                             Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))

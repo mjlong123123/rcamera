@@ -486,6 +486,12 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
                 broadcastCameraStatus()
             }
+            WsMessage.ACTION_SWITCH_CAMERA -> {
+                switchCamera()
+                val response = message.makeResponse(true, mapOf("is_front" to isFrontCamera()))
+                wsManager.sendToClient(conn, response)
+                broadcastCameraStatus()
+            }
             WsMessage.ACTION_PING -> {
                 val response = WsMessage(
                     id = message.id,

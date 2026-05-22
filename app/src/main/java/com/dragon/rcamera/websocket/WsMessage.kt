@@ -28,6 +28,7 @@ data class WsMessage(
         const val ACTION_STOP_RTP = "stop_rtp"
         const val ACTION_RTP_INFO = "rtp_info"
         const val ACTION_REQUEST_KEYFRAME = "request_keyframe"
+        const val ACTION_SWITCH_CAMERA = "switch_camera"
 
         private val gson = Gson()
 

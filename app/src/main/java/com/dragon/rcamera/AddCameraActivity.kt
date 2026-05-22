@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -57,6 +58,15 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
+
+data class QrParsedResult(
+    val name: String,
+    val wsUrl: String,
+    val password: String,
+    val ipv4Addresses: List<String> = emptyList(),
+    val ipv6Addresses: List<String> = emptyList(),
+    val port: Int = 8888
+)
 
 class AddCameraActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,11 +82,14 @@ class AddCameraActivity : ComponentActivity() {
             RCameraTheme {
                 AddCameraScreen(
                     onBack = { finish() },
-                    onSaved = { wsUrl, password, name ->
+                    onSaved = { wsUrl, password, name, ipv4Addresses, ipv6Addresses, port ->
                         val intent = Intent(this, CameraViewerActivity::class.java).apply {
                             putExtra(CameraViewerActivity.EXTRA_WS_URL, wsUrl)
                             putExtra(CameraViewerActivity.EXTRA_PASSWORD, password)
                             putExtra(CameraViewerActivity.EXTRA_CAMERA_NAME, name)
+                            putStringArrayListExtra(CameraViewerActivity.EXTRA_IPV4_ADDRESSES, ArrayList(ipv4Addresses))
+                            putStringArrayListExtra(CameraViewerActivity.EXTRA_IPV6_ADDRESSES, ArrayList(ipv6Addresses))
+                            putExtra(CameraViewerActivity.EXTRA_PORT, port)
                         }
                         startActivity(intent)
                         finish()
@@ -98,7 +111,7 @@ class AddCameraActivity : ComponentActivity() {
 @Composable
 fun AddCameraScreen(
     onBack: () -> Unit,
-    onSaved: (wsUrl: String, password: String, name: String) -> Unit,
+    onSaved: (wsUrl: String, password: String, name: String, ipv4Addresses: List<String>, ipv6Addresses: List<String>, port: Int) -> Unit,
     prefillWsUrl: String? = null,
     prefillPassword: String? = null
 ) {
@@ -107,6 +120,9 @@ fun AddCameraScreen(
     var name by remember { mutableStateOf("") }
     var wsUrl by remember { mutableStateOf(prefillWsUrl ?: "") }
     var password by remember { mutableStateOf(prefillPassword ?: "") }
+    var ipv4Addresses by remember { mutableStateOf<List<String>>(emptyList()) }
+    var ipv6Addresses by remember { mutableStateOf<List<String>>(emptyList()) }
+    var port by remember { mutableStateOf(8888) }
     var isScanning by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
 
@@ -139,30 +155,47 @@ fun AddCameraScreen(
         }
     }
 
-    fun parseQrContent(content: String): Triple<String, String, String>? {
+    fun parseQrContent(content: String): QrParsedResult? {
         // 支持格式:
-        // 1. rcamera://add?wsUrl=ws://[IPv6]:PORT&port=PORT&password=xxx
-        // 2. rcamera://ws://IP:PORT?name=MyCamera
-        // 3. ws://IP:PORT
-        // 4. ws://IP:PORT?name=MyCamera
+        // 1. rcamera://add?d=<base64_json> (new format with all IPs)
+        // 2. rcamera://add?wsUrl=ws://[IPv6]:PORT&port=PORT&password=xxx (old format)
+        // 3. rcamera://ws://IP:PORT?name=MyCamera
+        // 4. ws://IP:PORT
+        // 5. ws://IP:PORT?name=MyCamera
         return try {
             if (content.startsWith("rcamera://add?") || content.startsWith("rcamera://add/")) {
                 val uri = Uri.parse(content)
-                val wsUrlParam = uri.getQueryParameter("wsUrl") ?: return null
-                val nameParam = uri.getQueryParameter("name") ?: "远程摄像头"
-                val passwordParam = uri.getQueryParameter("password") ?: ""
-                Triple(nameParam, wsUrlParam, passwordParam)
+                val dParam = uri.getQueryParameter("d")
+                if (dParam != null) {
+                    // New format: base64 encoded JSON
+                    val jsonStr = String(android.util.Base64.decode(dParam, android.util.Base64.NO_WRAP))
+                    val json = com.google.gson.JsonParser.parseString(jsonStr).asJsonObject
+                    val ipv4 = json.getAsJsonArray("ipv4")?.map { it.asString } ?: emptyList()
+                    val ipv6 = json.getAsJsonArray("ipv6")?.map { it.asString } ?: emptyList()
+                    val p = json.get("port")?.asInt ?: 8888
+                    val pw = json.get("password")?.asString ?: ""
+                    val ws = if (ipv6.isNotEmpty()) "ws://[${ipv6.first()}]:$p"
+                        else if (ipv4.isNotEmpty()) "ws://${ipv4.first()}:$p"
+                        else ""
+                    QrParsedResult(name = "远程摄像头", wsUrl = ws, password = pw, ipv4Addresses = ipv4, ipv6Addresses = ipv6, port = p)
+                } else {
+                    // Old format: wsUrl parameter
+                    val wsUrlParam = uri.getQueryParameter("wsUrl") ?: return null
+                    val nameParam = uri.getQueryParameter("name") ?: "远程摄像头"
+                    val passwordParam = uri.getQueryParameter("password") ?: ""
+                    QrParsedResult(name = nameParam, wsUrl = wsUrlParam, password = passwordParam)
+                }
             } else if (content.startsWith("rcamera://")) {
                 val rest = content.removePrefix("rcamera://")
                 val uri = Uri.parse(rest)
                 val url = rest.substringBefore("?")
                 val n = uri.getQueryParameter("name") ?: "远程摄像头"
-                Triple(n, url, "")
+                QrParsedResult(name = n, wsUrl = url, password = "")
             } else if (content.startsWith("ws://") || content.startsWith("wss://")) {
                 val uri = Uri.parse(content)
                 val url = content.substringBefore("?")
                 val n = uri.getQueryParameter("name") ?: "远程摄像头"
-                Triple(n, url, "")
+                QrParsedResult(name = n, wsUrl = url, password = "")
             } else {
                 null
             }
@@ -172,14 +205,23 @@ fun AddCameraScreen(
     }
 
     fun saveCamera() {
-        if (name.isBlank() || wsUrl.isBlank()) return
+        if (name.isBlank()) return
+        val finalWsUrl = if (wsUrl.isNotBlank()) wsUrl.trim()
+            else if (ipv4Addresses.isNotEmpty()) "ws://${ipv4Addresses.first()}:$port"
+            else if (ipv6Addresses.isNotEmpty()) "ws://[${ipv6Addresses.first()}]:$port"
+            else return
+        val finalIpv4 = ipv4Addresses.ifEmpty { null }
+        val finalIpv6 = ipv6Addresses.ifEmpty { null }
         val camera = RemoteCamera(
             name = name.trim(),
-            wsUrl = wsUrl.trim(),
-            password = password.trim()
+            wsUrl = finalWsUrl,
+            password = password.trim(),
+            ipv4Addresses = finalIpv4,
+            ipv6Addresses = finalIpv6,
+            port = port
         )
         cameraStore.addCamera(camera)
-        onSaved(camera.wsUrl, camera.password, camera.name)
+        onSaved(camera.wsUrl, camera.password, camera.name, ipv4Addresses, ipv6Addresses, port)
     }
 
     Scaffold(
@@ -213,9 +255,12 @@ fun AddCameraScreen(
                         onQrCodeScanned = { content ->
                             val parsed = parseQrContent(content)
                             if (parsed != null) {
-                                name = parsed.first
-                                wsUrl = parsed.second
-                                password = parsed.third
+                                name = parsed.name
+                                wsUrl = parsed.wsUrl
+                                password = parsed.password
+                                ipv4Addresses = parsed.ipv4Addresses
+                                ipv6Addresses = parsed.ipv6Addresses
+                                port = parsed.port
                                 isScanning = false
                             }
                         },
@@ -261,14 +306,45 @@ fun AddCameraScreen(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            OutlinedTextField(
-                value = wsUrl,
-                onValueChange = { wsUrl = it },
-                label = { Text("WebSocket 地址 (ws://IP:PORT)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            Spacer(modifier = Modifier.height(8.dp))
+            // IP 地址列表（从二维码扫描获取）
+            if (ipv4Addresses.isNotEmpty() || ipv6Addresses.isNotEmpty()) {
+                Text(
+                    "IP 地址",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                if (ipv4Addresses.isNotEmpty()) {
+                    Text(
+                        "IPv4:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    ipv4Addresses.forEach { addr ->
+                        Text(
+                            "  $addr",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+                if (ipv6Addresses.isNotEmpty()) {
+                    Text(
+                        "IPv6:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    ipv6Addresses.forEach { addr ->
+                        Text(
+                            "  $addr",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             OutlinedTextField(
                 value = password,
@@ -283,9 +359,9 @@ fun AddCameraScreen(
             Surface(
                 onClick = { saveCamera() },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = name.isNotBlank() && wsUrl.isNotBlank(),
+                enabled = name.isNotBlank() && (wsUrl.isNotBlank() || ipv4Addresses.isNotEmpty() || ipv6Addresses.isNotEmpty()),
                 shape = MaterialTheme.shapes.medium,
-                color = if (name.isNotBlank() && wsUrl.isNotBlank())
+                color = if (name.isNotBlank() && (wsUrl.isNotBlank() || ipv4Addresses.isNotEmpty() || ipv6Addresses.isNotEmpty()))
                     MaterialTheme.colorScheme.primary
                 else
                     MaterialTheme.colorScheme.surfaceVariant
@@ -296,7 +372,7 @@ fun AddCameraScreen(
                 ) {
                     Text(
                         "保存",
-                        color = if (name.isNotBlank() && wsUrl.isNotBlank())
+                        color = if (name.isNotBlank() && (wsUrl.isNotBlank() || ipv4Addresses.isNotEmpty() || ipv6Addresses.isNotEmpty()))
                             MaterialTheme.colorScheme.onPrimary
                         else
                             MaterialTheme.colorScheme.onSurfaceVariant

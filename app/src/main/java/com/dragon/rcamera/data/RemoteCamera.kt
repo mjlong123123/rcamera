@@ -7,5 +7,8 @@ data class RemoteCamera(
     val name: String,
     val wsUrl: String,
     val password: String,
+    val ipv4Addresses: List<String>? = null,
+    val ipv6Addresses: List<String>? = null,
+    val port: Int = 8888,
     val addedAt: Long = System.currentTimeMillis()
 )
