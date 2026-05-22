@@ -15,7 +15,7 @@ android {
 
     defaultConfig {
         applicationId = "com.dragon.rcamera"
-        minSdk = 24
+        minSdk = 23
         targetSdk = 36
         versionCode = 13
         versionName = "1.3"

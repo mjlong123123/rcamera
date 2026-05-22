@@ -1,6 +1,7 @@
 package com.dragon.rcamera
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -56,6 +57,7 @@ import com.dragon.rcamera.ui.theme.RCameraTheme
 class AboutActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         enableEdgeToEdge()
         setContent {
             RCameraTheme {

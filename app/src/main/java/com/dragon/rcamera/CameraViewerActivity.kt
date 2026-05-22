@@ -1,5 +1,6 @@
 package com.dragon.rcamera
 
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.util.Log
 import android.view.SurfaceHolder
@@ -78,6 +79,7 @@ class CameraViewerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val wsUrl = intent.getStringExtra(EXTRA_WS_URL) ?: run {
