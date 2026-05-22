@@ -9,6 +9,7 @@ import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 
 class AudioPlayback {
 
@@ -23,41 +24,26 @@ class AudioPlayback {
     private var socket: DatagramSocket? = null
     private var receiveThread: Thread? = null
     private var isRunning = false
+    private val decoderLock = Any()
+    private var csdData: ByteArray? = null
+    private var csdReady = false
+
+    /** Provide AudioSpecificConfig (csd-0) data before the first audio frame arrives. */
+    fun setCodecSpecificData(data: ByteArray) {
+        synchronized(decoderLock) {
+            csdData = data
+            csdReady = true
+            // Recreate decoder now that CSD is available
+            initDecoder()
+        }
+    }
 
     fun start(): Int {
         if (isRunning) return socket?.localPort ?: 0
         isRunning = true
 
-        // Initialize AAC decoder
-        val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC,
-            SAMPLE_RATE, 1).apply {
-            setInteger(MediaFormat.KEY_IS_ADTS, 1)
-        }
-        decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
-            configure(format, null, null, 0)
-            start()
-        }
+        initAudioTrack()
 
-        // Initialize AudioTrack for PCM playback
-        val minBufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        audioTrack = AudioTrack(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build(),
-            AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .build(),
-            minBufferSize.coerceAtLeast(4096),
-            AudioTrack.MODE_STREAM,
-            0 // session ID (0 = auto-generate)
-        )
-        audioTrack?.play()
-
-        // Initialize UDP socket
         try {
             socket = DatagramSocket(null).apply {
                 reuseAddress = true
@@ -72,7 +58,6 @@ class AudioPlayback {
 
         val actualPort = socket?.localPort ?: 0
 
-        // Start receive thread
         receiveThread = Thread({ receiveLoop() }, "AudioReceiveThread").apply {
             isDaemon = true
             start()
@@ -81,15 +66,65 @@ class AudioPlayback {
         return actualPort
     }
 
+    private fun initDecoder() {
+        synchronized(decoderLock) {
+            try { decoder?.stop() } catch (_: Exception) {}
+            try { decoder?.release() } catch (_: Exception) {}
+            decoder = null
+
+            val csd = csdData ?: run {
+                Log.d(TAG, "initDecoder: no CSD yet, waiting")
+                return
+            }
+
+            val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC,
+                SAMPLE_RATE, 1)
+            format.setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+
+            decoder = try {
+                MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
+                    configure(format, null, null, 0)
+                    start()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create AAC decoder", e)
+                null
+            }
+        }
+    }
+
+    private fun initAudioTrack() {
+        try { audioTrack?.release() } catch (_: Exception) {}
+        val minBufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        audioTrack = AudioTrack(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build(),
+            AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build(),
+            minBufferSize.coerceAtLeast(4096),
+            AudioTrack.MODE_STREAM,
+            0
+        )
+        audioTrack?.play()
+    }
+
     fun stop() {
         isRunning = false
         receiveThread?.join(500)
         receiveThread = null
         try { socket?.close() } catch (_: Exception) {}
         socket = null
-        try { decoder?.stop() } catch (_: Exception) {}
-        try { decoder?.release() } catch (_: Exception) {}
-        decoder = null
+        synchronized(decoderLock) {
+            try { decoder?.stop() } catch (_: Exception) {}
+            try { decoder?.release() } catch (_: Exception) {}
+            decoder = null
+        }
         try { audioTrack?.stop() } catch (_: Exception) {}
         try { audioTrack?.release() } catch (_: Exception) {}
         audioTrack = null
@@ -100,7 +135,6 @@ class AudioPlayback {
 
     private fun receiveLoop() {
         val sock = socket ?: return
-        val decoder = decoder ?: return
         val audioTrack = audioTrack ?: return
         val buffer = ByteArray(4096)
         val packet = DatagramPacket(buffer, buffer.size)
@@ -113,23 +147,32 @@ class AudioPlayback {
                 sock.receive(packet)
                 if (!isRunning) break
 
-                // Extract AAC frame from RTP packet (skip 12-byte header)
                 val payloadLength = packet.length - RtpPacket.HEADER_SIZE
                 if (payloadLength <= 0) continue
                 val aacFrame = ByteArray(payloadLength)
                 System.arraycopy(packet.data, RtpPacket.HEADER_SIZE, aacFrame, 0, payloadLength)
 
-                // Feed to AAC decoder
-                val inputIndex = decoder.dequeueInputBuffer(TIMEOUT_US)
-                if (inputIndex >= 0) {
-                    val inputBuffer = decoder.getInputBuffer(inputIndex) ?: continue
-                    inputBuffer.clear()
-                    inputBuffer.put(aacFrame)
-                    decoder.queueInputBuffer(inputIndex, 0, aacFrame.size, 0L, 0)
-                }
+                synchronized(decoderLock) {
+                    val dec = decoder
+                    if (dec == null) {
+                        Log.d(TAG, "drop audio frame, decoder not ready")
+                        continue
+                    }
 
-                // Drain decoded PCM to AudioTrack
-                drainAndPlay(decoder, audioTrack, outputInfo)
+                    try {
+                        val inputIndex = dec.dequeueInputBuffer(TIMEOUT_US)
+                        if (inputIndex >= 0) {
+                            val inputBuffer = dec.getInputBuffer(inputIndex) ?: continue
+                            inputBuffer.clear()
+                            inputBuffer.put(aacFrame)
+                            dec.queueInputBuffer(inputIndex, 0, aacFrame.size, 0L, 0)
+                        }
+                        drainAndPlay(dec, audioTrack, outputInfo)
+                    } catch (e: IllegalStateException) {
+                        Log.e(TAG, "Decoder error, recreating", e)
+                        initDecoder()
+                    }
+                }
             }
         } catch (e: Exception) {
             if (isRunning) Log.e(TAG, "Audio receive loop error", e)
@@ -151,7 +194,11 @@ class AudioPlayback {
                 outputBuffer.get(pcmData, 0, info.size)
                 decoder.releaseOutputBuffer(outputIndex, false)
 
-                audioTrack.write(pcmData, 0, pcmData.size)
+                try {
+                    audioTrack.write(pcmData, 0, pcmData.size)
+                } catch (e: Exception) {
+                    Log.w(TAG, "AudioTrack write failed", e)
+                }
             }
         }
     }

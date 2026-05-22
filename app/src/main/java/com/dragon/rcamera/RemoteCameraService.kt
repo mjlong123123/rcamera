@@ -1009,6 +1009,19 @@ class RemoteCameraService : Service(), LifecycleOwner {
             if (isEncoding) return
             try {
                 rtpSender.start()
+                audioCapture.onCodecSpecificData = { csdBytes ->
+                    val csdBase64 = android.util.Base64.encodeToString(csdBytes, android.util.Base64.NO_WRAP)
+                    val msg = WsMessage(
+                        type = WsMessage.TYPE_EVENT,
+                        action = WsMessage.ACTION_AUDIO_CSD,
+                        payload = com.google.gson.JsonObject().apply {
+                            addProperty("csd", csdBase64)
+                        }
+                    )
+                    for (conn in wsManager.getAuthenticatedConnections()) {
+                        wsManager.sendToClient(conn, msg)
+                    }
+                }
                 val audioPort = audioCapture.start()
                 wsManager.setRtpPort(rtpSender.getLocalPort())
                 createEncoderSurface()

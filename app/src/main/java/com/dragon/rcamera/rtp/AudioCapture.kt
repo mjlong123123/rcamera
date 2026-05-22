@@ -9,10 +9,10 @@ import android.media.MediaRecorder
 import android.util.Log
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketException
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -21,11 +21,11 @@ class AudioCapture {
     companion object {
         private const val TAG = "AudioCapture"
         private const val SAMPLE_RATE = 16000
-        private const val CHANNELS = 1 // mono
+        private const val CHANNELS = 1
         private const val BIT_RATE = 32000
-        private const val PCM_BUFFER_SIZE = 2048 // 1024 samples * 2 bytes
+        private const val PCM_BUFFER_SIZE = 2048
         private const val TIMEOUT_US = 10000L
-        private const val AUDIO_PT = 97 // dynamic RTP payload type for audio
+        private const val AUDIO_PT = 97
         private const val AUDIO_CLOCK_RATE = 16000
     }
 
@@ -39,24 +39,25 @@ class AudioCapture {
     private var timestamp: Long = 0
     private val destinations = ConcurrentHashMap<String, InetSocketAddress>()
 
+    /** Called when the encoder produces AudioSpecificConfig (csd-0) data. */
+    var onCodecSpecificData: ((ByteArray) -> Unit)? = null
+
     fun start(): Int {
         if (isRunning) return socket?.localPort ?: 0
         isRunning = true
 
-        // Initialize audio recorder
         val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             minBufferSize.coerceAtLeast(PCM_BUFFER_SIZE * 4))
 
-        // Initialize AAC encoder
+        // AAC encoder — raw output (no ADTS), csd-0 will be extracted
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC,
             SAMPLE_RATE, CHANNELS).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
             setInteger(MediaFormat.KEY_AAC_PROFILE,
                 MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_IS_ADTS, 1)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, PCM_BUFFER_SIZE)
         }
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
@@ -64,7 +65,6 @@ class AudioCapture {
             start()
         }
 
-        // Initialize UDP socket
         try {
             socket = DatagramSocket(null).apply {
                 reuseAddress = true
@@ -85,7 +85,6 @@ class AudioCapture {
 
         val actualPort = socket?.localPort ?: 0
 
-        // Start capture thread
         captureThread = Thread({ captureLoop() }, "AudioCaptureThread").apply {
             isDaemon = true
             start()
@@ -139,11 +138,9 @@ class AudioCapture {
 
         try {
             while (isRunning) {
-                // Read PCM from microphone
                 val bytesRead = audioRecord.read(buffer, 0, buffer.size)
                 if (bytesRead <= 0) continue
 
-                // Feed PCM to AAC encoder
                 val inputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
                 if (inputIndex >= 0) {
                     val inputBuffer = encoder.getInputBuffer(inputIndex) ?: continue
@@ -151,17 +148,15 @@ class AudioCapture {
                     inputBuffer.put(buffer, 0, bytesRead)
                     encoder.queueInputBuffer(inputIndex, 0, bytesRead,
                         timestamp * 1000000L / AUDIO_CLOCK_RATE, 0)
-                    timestamp += (bytesRead / 2).toLong() // 16-bit samples
+                    timestamp += (bytesRead / 2).toLong()
                 }
 
-                // Drain encoded AAC frames
                 drainEncoder(encoder, outputInfo)
             }
         } catch (e: Exception) {
             if (isRunning) Log.e(TAG, "Audio capture loop error", e)
         }
 
-        // Drain remaining frames
         drainEncoder(encoder, outputInfo)
 
         try { audioRecord.stop() } catch (_: Exception) {}
@@ -172,7 +167,16 @@ class AudioCapture {
         while (true) {
             val outputIndex = encoder.dequeueOutputBuffer(info, TIMEOUT_US)
             if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) break
-            if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
+            if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // Capture AudioSpecificConfig (csd-0) from output format
+                val csd = encoder.outputFormat.getByteBuffer("csd-0")
+                if (csd != null) {
+                    val csdBytes = ByteArray(csd.remaining())
+                    csd.get(csdBytes)
+                    onCodecSpecificData?.invoke(csdBytes)
+                }
+                continue
+            }
 
             if (outputIndex >= 0) {
                 val outputBuffer = encoder.getOutputBuffer(outputIndex) ?: continue
@@ -183,7 +187,6 @@ class AudioCapture {
 
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) continue
 
-                // Send AAC frame as RTP packet
                 sendAudioPacket(aacFrame)
             }
         }
@@ -193,7 +196,9 @@ class AudioCapture {
         val sock = socket ?: return
         if (destinations.isEmpty()) return
 
-        val ts = (timestamp * AUDIO_CLOCK_RATE / AUDIO_CLOCK_RATE) and 0xFFFFFFFFL
+        // Send raw AAC frame (csd-0 delivered separately via WebSocket)
+        timestamp += 1024
+        val ts = timestamp and 0xFFFFFFFFL
         val packet = RtpPacket.build(
             payload = aacFrame,
             payloadLength = aacFrame.size,

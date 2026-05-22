@@ -286,6 +286,14 @@ fun CameraViewerScreen(
                     Log.e("CameraViewer", "RTP start failed: ${message.payload}")
                 }
             }
+            if (message.action == WsMessage.ACTION_AUDIO_CSD) {
+                val csdB64 = message.payload.get("csd")?.asString
+                if (csdB64 != null) {
+                    val csdBytes = android.util.Base64.decode(csdB64, android.util.Base64.NO_WRAP)
+                    audioPlayback.setCodecSpecificData(csdBytes)
+                    Log.d("CameraViewer", "Received audio CSD (${csdBytes.size} bytes)")
+                }
+            }
         }
 
         onDispose {
