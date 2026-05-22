@@ -67,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -341,10 +342,48 @@ fun CameraPreviewScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    // 二维码 - 仅当 WS 运行且有 IP 信息时
+                    // IP 地址列表 - 仅当 WS 运行且有 IP 信息时
                     if (isWsRunning && ipInfo != null) {
                         val info = ipInfo!!
-                        Spacer(modifier = Modifier.height(24.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "IP 地址",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (info.ipv4Addresses.isNotEmpty()) {
+                            Text(
+                                text = "IPv4:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            info.ipv4Addresses.forEach { addr ->
+                                Text(
+                                    text = "  $addr",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        if (info.ipv6Addresses.isNotEmpty()) {
+                            Text(
+                                text = "IPv6:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            info.ipv6Addresses.forEach { addr ->
+                                Text(
+                                    text = "  $addr",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+
+                        // 二维码
+                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = "扫码添加摄像头",
                             style = MaterialTheme.typography.titleSmall,
