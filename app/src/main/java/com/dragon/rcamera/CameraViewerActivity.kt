@@ -158,8 +158,9 @@ fun CameraViewerScreen(
     // Sequential connection state
     val connectionAttemptUrls = remember {
         buildList {
-            ipv4Addresses.forEach { add("ws://$it:$port") }
+            // IPv6 first (external connection), then IPv4 (LAN fallback)
             ipv6Addresses.forEach { add("ws://[$it]:$port") }
+            ipv4Addresses.forEach { add("ws://$it:$port") }
             if (isEmpty()) add(wsUrl)
         }
     }

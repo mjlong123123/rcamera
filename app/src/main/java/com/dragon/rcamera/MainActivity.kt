@@ -290,7 +290,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "RCamera v1.3",
+                text = "RCamera v1.4",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             )

@@ -488,6 +488,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             }
             WsMessage.ACTION_SWITCH_CAMERA -> {
                 switchCamera()
+                externalPreview?.let { bindPreviewUseCase(it) }
                 val response = message.makeResponse(true, mapOf("is_front" to isFrontCamera()))
                 wsManager.sendToClient(conn, response)
                 broadcastCameraStatus()

@@ -27,6 +27,7 @@ class WsClient(
 
     private val secretKey: SecretKey = CryptoUtil.deriveKey(password)
     private val client = OkHttpClient.Builder()
+        .connectTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
         .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private var webSocket: WebSocket? = null
