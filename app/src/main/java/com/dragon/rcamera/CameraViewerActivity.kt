@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.dragon.rcamera.data.CameraStore
 import com.dragon.rcamera.data.RemoteCamera
+import com.dragon.rcamera.rtp.AudioPlayback
 import com.dragon.rcamera.rtp.H264Decoder
 import com.dragon.rcamera.rtp.RtpReceiver
 import com.dragon.rcamera.ui.theme.RCameraTheme
@@ -80,6 +81,7 @@ class CameraViewerActivity : ComponentActivity() {
     private val wsManager = WebSocketManager()
     private val rtpReceiver = RtpReceiver()
     private val h264Decoder = H264Decoder()
+    private val audioPlayback = AudioPlayback()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,6 +110,7 @@ class CameraViewerActivity : ComponentActivity() {
                     wsManager = wsManager,
                     rtpReceiver = rtpReceiver,
                     h264Decoder = h264Decoder,
+                    audioPlayback = audioPlayback,
                     onBack = { finish() }
                 )
             }
@@ -120,6 +123,7 @@ class CameraViewerActivity : ComponentActivity() {
     }
 
     private fun cleanup() {
+        audioPlayback.stop()
         h264Decoder.stop()
         rtpReceiver.stop()
         wsManager.stop()
@@ -139,6 +143,7 @@ fun CameraViewerScreen(
     wsManager: WebSocketManager,
     rtpReceiver: RtpReceiver,
     h264Decoder: H264Decoder,
+    audioPlayback: AudioPlayback,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -236,10 +241,14 @@ fun CameraViewerScreen(
                 val localRtpPort = rtpReceiver.getLocalPort()
                 Log.d("CameraViewer", "WebSocket connected, local RTP port=$localRtpPort")
                 if (localRtpPort > 0) {
+                    val localAudioPort = audioPlayback.getLocalPort()
                     val sent = wsManager.sendCommand(WsMessage.ACTION_START_RTP, com.google.gson.JsonObject().apply {
                         addProperty("rtp_port", localRtpPort)
+                        if (localAudioPort > 0) {
+                            addProperty("audio_port", localAudioPort)
+                        }
                     })
-                    Log.d("CameraViewer", "Sent start_rtp command: port=$localRtpPort, sent=$sent")
+                    Log.d("CameraViewer", "Sent start_rtp command: video_port=$localRtpPort, audio_port=$localAudioPort, sent=$sent")
                 } else {
                     Log.e("CameraViewer", "RTP receiver port is 0, cannot start RTP! Receiver may have failed to start.")
                 }
@@ -267,11 +276,12 @@ fun CameraViewerScreen(
                 if (success) {
                     isReceiving = true
                     val serverRtpPort = message.payload.get("server_rtp_port")?.asInt ?: 0
+                    val serverAudioPort = message.payload.get("server_audio_port")?.asInt ?: 0
                     val w = message.payload.get("video_width")?.asInt ?: 0
                     val h = message.payload.get("video_height")?.asInt ?: 0
                     videoWidth = w
                     videoHeight = h
-                    Log.d("CameraViewer", "RTP stream started, server_rtp_port=$serverRtpPort, video=${w}x${h}")
+                    Log.d("CameraViewer", "RTP stream started, server_rtp_port=$serverRtpPort, server_audio_port=$serverAudioPort, video=${w}x${h}")
                 } else {
                     Log.e("CameraViewer", "RTP start failed: ${message.payload}")
                 }
@@ -279,13 +289,14 @@ fun CameraViewerScreen(
         }
 
         onDispose {
+            audioPlayback.stop()
             h264Decoder.stop()
             rtpReceiver.stop()
             wsManager.stop()
         }
     }
 
-    // Start RTP receiver immediately
+    // Start RTP receiver and audio playback immediately
     LaunchedEffect(Unit) {
         rtpReceiver.onFrameReceived = { frameData ->
             h264Decoder.feedFrame(frameData)
@@ -295,6 +306,10 @@ fun CameraViewerScreen(
             wsManager.sendCommand(WsMessage.ACTION_REQUEST_KEYFRAME, com.google.gson.JsonObject())
         }
         rtpReceiver.start(0) // Use any available port
+
+        // Start audio playback on a separate port
+        audioPlayback.start()
+        Log.d("CameraViewer", "AudioPlayback started on port ${audioPlayback.getLocalPort()}")
     }
 
     Scaffold(

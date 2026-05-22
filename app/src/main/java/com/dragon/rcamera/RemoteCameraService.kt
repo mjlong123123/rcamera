@@ -39,6 +39,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.Lifecycle
 import com.dragon.rcamera.data.CameraStore
+import com.dragon.rcamera.rtp.AudioCapture
 import com.dragon.rcamera.rtp.RtpSender
 import com.dragon.rcamera.websocket.WsMessage
 import com.dragon.rcamera.websocket.WebSocketManager
@@ -86,6 +87,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
 
     // RTP and encoding
     private val rtpSender = RtpSender()
+    private val audioCapture = AudioCapture()
     private var encoder: MediaCodec? = null
     private var isEncoding = false
     private val encodingLock = Object()
@@ -505,6 +507,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             }
             WsMessage.ACTION_START_RTP -> {
                 val rtpPort = message.payload.get("rtp_port")?.asInt ?: return
+                val audioPort = message.payload.get("audio_port")?.asInt
                 val host = conn.remoteSocketAddress?.address?.hostAddress ?: return
                 val isIpv6 = host.contains(":")
 
@@ -512,16 +515,27 @@ class RemoteCameraService : Service(), LifecycleOwner {
                 rtpSender.addDestination(clientId, host, rtpPort)
                 Log.d(TAG, "RTP destination added: $host:$rtpPort (IPv${if (isIpv6) "6" else "4"}), sender socket bound to ${rtpSender.getLocalPort()}")
 
+                // Add audio destination if client provided audio port
+                if (audioPort != null && audioPort > 0) {
+                    audioCapture.addDestination(clientId, host, audioPort)
+                    Log.d(TAG, "Audio destination added: $host:$audioPort")
+                }
+
                 val needSwap = frameRotationDegrees == 90 || frameRotationDegrees == 270
                 val encodedWidth = if (needSwap) encoderHeight else encoderWidth
                 val encodedHeight = if (needSwap) encoderWidth else encoderHeight
 
-                val response = message.makeResponse(true, mapOf(
+                val respPayload = mutableMapOf<String, Any>(
                     "rtp_started" to true,
                     "server_rtp_port" to (rtpSender.getLocalPort()),
                     "video_width" to encodedWidth,
                     "video_height" to encodedHeight
-                ))
+                )
+                val serverAudioPort = audioCapture.getLocalPort()
+                if (serverAudioPort > 0) {
+                    respPayload["server_audio_port"] = serverAudioPort
+                }
+                val response = message.makeResponse(true, respPayload)
                 wsManager.sendToClient(conn, response)
                 Log.d(TAG, "WS send to ${conn.remoteSocketAddress}: $response")
 
@@ -531,6 +545,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             }
             WsMessage.ACTION_STOP_RTP -> {
                 rtpSender.removeDestination(clientId)
+                audioCapture.removeDestination(clientId)
                 clientRtpPorts.remove(clientId)
 
                 val response = message.makeResponse(true, mapOf("rtp_stopped" to true))
@@ -544,6 +559,10 @@ class RemoteCameraService : Service(), LifecycleOwner {
             WsMessage.ACTION_REQUEST_KEYFRAME -> {
                 Log.d(TAG, "Keyframe requested by client $clientId")
                 requestKeyFrameFromEncoder()
+            }
+            WsMessage.ACTION_STOP_AUDIO -> {
+                audioCapture.removeDestination(clientId)
+                Log.d(TAG, "Audio stopped for client $clientId")
             }
         }
     }
@@ -990,10 +1009,11 @@ class RemoteCameraService : Service(), LifecycleOwner {
             if (isEncoding) return
             try {
                 rtpSender.start()
+                val audioPort = audioCapture.start()
                 wsManager.setRtpPort(rtpSender.getLocalPort())
                 createEncoderSurface()
                 isEncoding = true
-                Log.d(TAG, "Encoding and RTP started with surface input")
+                Log.d(TAG, "Encoding and RTP started, audio on port $audioPort")
                 updateCameraState()
                 updateWakeLockState()
             } catch (e: Exception) {
@@ -1008,6 +1028,7 @@ class RemoteCameraService : Service(), LifecycleOwner {
             isEncoding = false
             releaseEncoderSurface()
             stopH264Encoder()
+            audioCapture.stop()
             rtpSender.stop()
             clientRtpPorts.clear()
             clientAddresses.clear()
