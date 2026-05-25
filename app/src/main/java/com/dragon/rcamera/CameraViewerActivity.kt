@@ -296,7 +296,14 @@ fun CameraViewerScreen(
             }
         }
 
+        h264Decoder.onOutputFormatChanged = { w, h ->
+            Log.d("CameraViewer", "Decoder output format changed: ${w}x${h}")
+            videoWidth = w
+            videoHeight = h
+        }
+
         onDispose {
+            h264Decoder.onOutputFormatChanged = null
             audioPlayback.stop()
             h264Decoder.stop()
             rtpReceiver.stop()
@@ -366,17 +373,24 @@ fun CameraViewerScreen(
                 .padding(innerPadding)
                 .clipToBounds()
         ) {
-            // Video: fill height, maintain 9:16 ratio — overflow horizontally for crop-center
+            // Video: fit within available space at the video's actual aspect ratio — no clipping
+            val videoAspect = remember(videoWidth, videoHeight) {
+                if (videoWidth > 0 && videoHeight > 0) {
+                    videoWidth.toFloat() / videoHeight.toFloat()
+                } else {
+                    9f / 16f // default portrait before dimensions are known
+                }
+            }
             AndroidView(
                 modifier = Modifier
-                    .fillMaxHeight()
-                    .aspectRatio(9f / 16f)
+                    .fillMaxSize()
+                    .aspectRatio(videoAspect)
                     .align(Alignment.Center),
                 factory = { ctx ->
                     SurfaceView(ctx).also { surfaceView ->
                         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                             override fun surfaceCreated(holder: SurfaceHolder) {
-                                holder.setFixedSize(720, 1280)
+                                // Don't setFixedSize — let the Surface buffer follow the layout dimensions
                                 h264Decoder.start(holder.surface)
                                 isSurfaceReady = true
                                 wsManager.connectAsClient(currentAttemptUrl, password)

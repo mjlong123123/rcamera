@@ -27,6 +27,7 @@ class H264Decoder {
     @Volatile private var decodedFrameCount = 0
     @Volatile private var inputErrorCount = 0
     @Volatile private var droppedFrameCount = 0
+    var onOutputFormatChanged: ((width: Int, height: Int) -> Unit)? = null
 
     fun getStats(): String = "fed=$fedFrameCount decoded=$decodedFrameCount errors=$inputErrorCount dropped=$droppedFrameCount buf=${frameBuffer.size} running=$isRunning"
 
@@ -209,7 +210,11 @@ class H264Decoder {
                     Log.d(TAG, "Decoded $decodedFrameCount frames")
                 }
             } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                Log.d(TAG, "Output format changed: ${dec.outputFormat}")
+                val format = dec.outputFormat
+                Log.d(TAG, "Output format changed: $format")
+                val w = format.getInteger(MediaFormat.KEY_WIDTH)
+                val h = format.getInteger(MediaFormat.KEY_HEIGHT)
+                onOutputFormatChanged?.invoke(w, h)
             } else {
                 break
             }
