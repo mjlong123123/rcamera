@@ -115,6 +115,5 @@ RCamera 的核心价值就三个字：**零成本**。
 
 旧手机别吃灰了，装个 RCamera，立刻变成你的私人监控系统。
 
----
 
-*RCamera 由 DragonCoding 开发，微信公众号搜索 **DragonCoding** 获取更多内容。产品主页：https://mjlong123.top/products/rcamera*
+*RCamera 由 DragonCoding 开发，微信公众号搜索 **DragonCoding** 获取更多内容。
